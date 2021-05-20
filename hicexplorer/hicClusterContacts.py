@@ -117,8 +117,8 @@ def get_pairs(regions,min_distance=1000000,max_distance=20000000,resolution=1):
             #ge = find_ge(chr_regions['Start'], (pos + max_distance) / resolution) + 1
             #current = chr_regions[le:ge]
             
-            #build pair dataframe from hard copy
-            current = current.copy()
+            #build pair dataframe
+            #current = current.copy()
             current['pairChrom'] = row['Chrom']
             current['pairStart'] = row['Start']
             current['pairEnd'] = row['End']
@@ -228,13 +228,16 @@ def get_features(submatrices,center_size=0.2,corner_position=None,corner_size=2)
     '''select features from the given submatrices'''
     
     #compute center square of matrix
-    submatrix_radius = math.floor(submatrices[0].shape[0] / 2)
-    center_abs_size = math.floor(submatrix_radius*center_size)
-        
-    center = math.floor(submatrices[0].shape[0] / 2) + 1
+    submatrix_size = submatrices[0].shape[0]
+    submatrix_radius = math.floor(submatrix_size / 2.0)
+    center = math.ceil(submatrix_size / 2.0)
+
+    center_abs_size = max(math.floor(submatrix_radius * center_size),1)
+    
     lo_c = center - center_abs_size
     hi_c = center + center_abs_size + 1
     shape_ = (hi_c-lo_c)**2
+
     features = np.zeros((len(submatrices),shape_))
         
     #build features on list of submatrices
@@ -259,11 +262,9 @@ def get_features(submatrices,center_size=0.2,corner_position=None,corner_size=2)
                 m = np.nanmean(corner)
 
                 if(m > 0):
-                    f_o = f / m
-                else:
-                    f_o = f
+                    f = f / m
 
-            return f_o
+            return f
         
         else:
             return np.zeros(shape_)
@@ -274,6 +275,7 @@ def get_features(submatrices,center_size=0.2,corner_position=None,corner_size=2)
     return features
 
 def get_feature_matrix(pairs,features):
+    
     
     pair_positions = pairs[['pairChrom','pairStart','pairEnd']].rename(columns = {'pairChrom':'Chrom', 'pairStart': 'Start', 'pairEnd': 'End'}, inplace = False)
     indices_list = pd.concat([pairs[['Chrom','Start','End']].copy(),pair_positions])
@@ -450,7 +452,7 @@ $ hicClusterContacts
     parserOpt.add_argument('--submatrixCenterSize',
                            help='size of central feature square',
                            type=int,
-                           default=3)
+                           default=0.2)
     
     parserOpt.add_argument('--useCompareToBorder',
                            help='compare to border of submatrices',
@@ -482,6 +484,14 @@ $ hicClusterContacts
 
     parserOpt.add_argument('--version', action='version',
                            version='%(prog)s {}'.format(__version__))
+    
+    parserOpt.add_argument('--devFeatureType',
+                           choices=[
+                               'per_region',
+                               'per_pair'
+                           ],
+                           default='per_region',
+                           help='for development: use features per region or per pair')
 
     return parser
     
@@ -501,6 +511,7 @@ def main(args=None):
     k = args.numberOfOutputClusters
     out_file_contact_pairs = args.outFileContactPairs
     out_file_fig = args.outFileFig
+    dev_feature_type = args.devFeatureType
     
     resolution = 1
     corner_position = 'upper_left'
@@ -532,7 +543,9 @@ def main(args=None):
     print('aggregating features for clustering')
     #aggregate features from submatrices
     features = get_features(submatrices,center_size=center_size,corner_position=corner_position,corner_size=corner_size)
-    pairs, indices_list, features = get_feature_matrix(pairs,features)
+    
+    if(dev_feature_type == 'per_region'):
+        pairs, indices_list, features = get_feature_matrix(pairs,features)
     
     print('clustering')
     #cluster submatrices
