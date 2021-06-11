@@ -15,7 +15,10 @@ from hicexplorer.utilities import convertNansToZeros, convertInfsToZeros
 from bisect import bisect_right
 from bisect import bisect_left
 from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA 
+from sklearn.decomposition import PCA
+import matplotlib.gridspec as gridspec
+import matplotlib.cm as cm
+
 
 #import HiCExplorer
 from hicmatrix import HiCMatrix as hm
@@ -80,7 +83,14 @@ def read_regions_bed(bed_file):
     
     # read and sort
     bed_df = pd.read_csv(bed_file, sep="\t", header=None)
-    bed_df.columns = get_regions_bed_col_names()
+
+    assert (bed_df.shape[1] == 6 or bed_df.shape[1] == 5)
+    
+    if(bed_df.shape[1] == 6):
+        bed_df.columns = get_regions_bed_col_names()
+    else:
+        bed_df.columns = get_regions_bed_col_names_5()
+    
     bed_df = bed_df.sort_values(by=["Chrom", "Start"])
 
     if(bed_df.size < 1):
@@ -275,7 +285,7 @@ def get_features(submatrices,center_size=0.2,corner_position=None,corner_size=2)
     return features
 
 def get_feature_matrix(pairs,features):
-    
+    '''build features per region from features per interaction'''
     
     pair_positions = pairs[['pairChrom','pairStart','pairEnd']].rename(columns = {'pairChrom':'Chrom', 'pairStart': 'Start', 'pairEnd': 'End'}, inplace = False)
     indices_list = pd.concat([pairs[['Chrom','Start','End']].copy(),pair_positions])
@@ -285,6 +295,9 @@ def get_feature_matrix(pairs,features):
 
     pairs = pd.merge(pairs, indices_list, how='inner', left_on=['Chrom','Start','End'], right_on=['Chrom','Start','End'])
     pairs = pd.merge(pairs, indices_list, how='inner', left_on=['pairChrom','pairStart','pairEnd'], right_on=['Chrom','Start','End'])
+    
+    #TODO
+    pairs['Strand'] = pairs['UnknownCol1']
     
     pairs = pairs[['Chrom_x','Start_x','End_x','UnknownCol1','UnknownCol2','Strand','pairChrom','pairStart','pairEnd','Index','pairIndex','featureIndex_x','featureIndex_y']]
     pairs = pairs.rename(columns = {'Chrom_x':'Chrom', 'Start_x': 'Start', 'End_x': 'End', 'featureIndex_x': 'featureIndex', 'featureIndex_y': 'pairFeatureIndex'}, inplace = False)
@@ -311,15 +324,23 @@ def perform_clustering(features,k,cluster_algorithm=None):
     
     clustering = skclust.KMeans(n_clusters=k, random_state=0).fit(features)
     cluster_labels = clustering.labels_
-    return cluster_labels
+    return pd.Series(cluster_labels)
 
 def get_regions_bed_col_names():
     '''get column names'''
 
     return ['Chrom', 'Start', 'End', 'UnknownCol1', 'UnknownCol2', 'Strand']
 
+def get_regions_bed_col_names_5():
+    '''get column names'''
+
+    return ['Chrom', 'Start', 'End', 'UnknownCol1', 'UnknownCol2']
+
 def output_results(out_file_contact_pairs,pairs,indices_list,clusters):
     '''output results to bed file'''
+
+    #TODO
+    pairs['Strand'] = pairs['UnknownCol1']
     
     indices_list['Cluster'] = clusters
     pairs = pd.merge(pairs, indices_list, how='inner', left_on=['Chrom','Start','End'], right_on=['Chrom','Start','End'])
@@ -330,6 +351,10 @@ def output_results_alt(out_file_contact_pairs,pairs,clusters):
     '''output results to bed file'''
 
     pairs['Cluster'] = clusters
+    
+    #TODO
+    pairs['Strand'] = pairs['UnknownCol1']
+    
     pairs = pairs[['Chrom','Start','End','UnknownCol1','UnknownCol2','Strand','pairChrom','pairStart','pairEnd','Cluster']]
     pairs.to_csv(out_file_contact_pairs, sep='\t', header=None, index=False)
 
@@ -358,6 +383,7 @@ def plot_results(features,clusters,out_file_fig):
     
     #fig.show()
     fig.savefig(out_file_fig)
+    plt.close()
 
 def find_le(a, x):
     'Find rightmost value less than or equal to x'
@@ -376,6 +402,63 @@ def find_ge(a, x):
     if i != len(a):
         return i
     raise ValueError
+    
+def plot_submatrices(submatrices, clusters, out_file_name):
+
+    assert len(clusters) == len(submatrices)
+    clusters = pd.Series(clusters)
+    cluster_list = clusters.unique()
+    cluster_list.sort()
+    aggr_submatrices = []
+    submatrices = np.array(submatrices)
+    clusters = clusters.to_numpy()
+    mode = 'mean'
+    M_half = int((submatrices[0].shape[0] - 1) // 2)
+    
+    for c in cluster_list:
+        cluster_indices = clusters == c
+        cluster_submatrices = submatrices[cluster_indices]
+        
+        if(mode == 'median'):
+            aggr_submatrix = np.median(cluster_submatrices, axis=0)
+        else:
+            aggr_submatrix = np.mean(cluster_submatrices, axis=0)
+            
+        aggr_submatrices.append(aggr_submatrix)
+    
+    
+    if(mode == 'median'):
+        aggr_submatrix_all = np.median(submatrices, axis=0)
+    else:
+        aggr_submatrix_all = np.mean(submatrices, axis=0)
+    
+    assert len(aggr_submatrices) == len(cluster_list)
+    
+    fig = plt.figure(figsize=(5.5 * (len(cluster_list) + 1), 5.5))
+    gs = gridspec.GridSpec(1,(len(cluster_list) + 1))
+
+    gs.update(wspace=0.01, hspace=0.2)
+
+    for cluster_number in range(0,len(aggr_submatrices)):
+            title = "cluster_{}".format(cluster_number + 1)
+            ax = plt.subplot(gs[0,cluster_number])
+            ax.set_title(title)
+            img = ax.imshow(aggr_submatrices[cluster_number], aspect='equal',interpolation='nearest',extent=[-M_half, M_half + 1, -M_half, M_half + 1])
+    
+    title = 'all'
+    ax = plt.subplot(gs[0,len(cluster_list)])
+    ax.set_title(title)    
+    img = ax.imshow(aggr_submatrix_all, aspect='equal',interpolation='nearest',extent=[-M_half, M_half + 1, -M_half, M_half + 1])
+    plt.savefig(out_file_name, dpi=300)
+    #plt.show()
+    
+def region_to_pair_cluster_labels(pairs,indices_list,clusters):
+    '''clusters per region to clusters per pair'''
+    
+    indices_list['Cluster'] = clusters
+    o = pd.merge(pairs, indices_list, how='inner', left_on=['Chrom','Start','End'], right_on=['Chrom','Start','End']) 
+    
+    return o['Cluster']
     
 #define parser and description
 
@@ -405,15 +488,9 @@ $ hicClusterContacts
                                 required=True,
                                 type=str)    
 
-    parserRequired.add_argument('--outFileContactPairs',
+    parserRequired.add_argument('--outFilePrefix',
                                 '-o',
-                                help='file name for output bed file',
-                                required=True,
-                                type=str)
-    
-    parserRequired.add_argument('--outFileFig',
-                                '-p',
-                                help='file name for output plot',
+                                help='directory and prefix of output files',
                                 required=True,
                                 type=str)
 
@@ -509,9 +586,10 @@ def main(args=None):
     compare_to_border = args.useCompareToBorder
     cluster_algorithm = args.clusterAlgorithm
     k = args.numberOfOutputClusters
-    out_file_contact_pairs = args.outFileContactPairs
-    out_file_fig = args.outFileFig
     dev_feature_type = args.devFeatureType
+    
+    out_file_contact_pairs = args.outFilePrefix + 'contact_pairs.bed'
+    out_file_fig = args.outFilePrefix + 'scatter.png'
     
     resolution = 1
     corner_position = 'upper_left'
@@ -530,7 +608,7 @@ def main(args=None):
     
     print('normalizing matrix file')
     #normalize matrix file(s)
-    matrix = obs_exp_normalization(matrix, pThreads=threads)
+    #matrix = obs_exp_normalization(matrix, pThreads=threads)
     
     print('calculating valid interaction pairs')
     #get pairs
@@ -546,15 +624,29 @@ def main(args=None):
     
     if(dev_feature_type == 'per_region'):
         pairs, indices_list, features = get_feature_matrix(pairs,features)
-    
-    print('clustering')
-    #cluster submatrices
-    clusters = perform_clustering(features,k,cluster_algorithm=cluster_algorithm)
-    
-    print('writing results to file')
-    #output results
-    output_results(out_file_contact_pairs,pairs,indices_list,clusters)
+            
+        print('clustering')
+        #cluster submatrices
+        clusters = perform_clustering(features,k,cluster_algorithm=cluster_algorithm)
+        clusters_per_interactions = region_to_pair_cluster_labels(pairs,indices_list,clusters)
+        
+        print('writing results to file')
+        output_results(out_file_contact_pairs,pairs,indices_list,clusters)
+        
+    else:
+        print('clustering')
+        #cluster submatrices
+        clusters = perform_clustering(features,k,cluster_algorithm=cluster_algorithm)
+        clusters_per_interactions = clusters
+        
+        print('writing results to file')
+        output_results_alt(out_file_contact_pairs,pairs,clusters)
     
     print('plotting results in scatter plot')
     plot_results(features,clusters,out_file_fig)
+    
+    print('plot submatrices')
+    plot_submatrices(submatrices,clusters_per_interactions,args.outFilePrefix + 'mean_submatrices.png')
+    
+    
     print('Done')
