@@ -10,8 +10,8 @@ import numpy.testing as nt
 from hicexplorer.test.test_compute_function import compute
 
 
-ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "test_data/hicClusterContacts/")
-#ROOT = "test_data/"
+#ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "test_data/")
+ROOT = "test_data/"
 
 def test_read_matrix_file():
     m = read_matrix_file(ROOT + 'unittest_matrix.h5', None)
@@ -119,4 +119,19 @@ def test_plot_results():
     test_folder = mkdtemp(prefix="test_case_cluster_contacts")
     plot_results(features,clusters,test_folder + 'test_output_fig.png')
     #plot_results(features,clusters,'test_output_fig.png')
+    assert True
+
+def test_plot_submatrices():
+    m = read_matrix_file(ROOT + 'unittest_matrix.h5', None)
+    regions = read_regions_bed(ROOT + 'unittest_regions.bed')
+    pairs = get_pairs(regions,min_distance=1000000,max_distance=20000000,resolution=1)
+    pairs,submatrices = get_submatrices(m,pairs,submatrix_size=9)
+    features = get_features(submatrices,center_size=0.25,corner_position='upper_left',corner_size=2)
+    clusters = perform_clustering(features,3)
+    #min_value = np.min(m.matrix)
+    #max_value = np.max(m.matrix)
+    min_value=None
+    max_value=None
+    test_folder = mkdtemp(prefix="test_case_plot_submatrices")
+    plot_submatrices(submatrices, clusters,'test_output_fig.png',vmin=min_value,vmax=max_value)
     assert True

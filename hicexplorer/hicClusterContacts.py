@@ -10,20 +10,30 @@ import pytest
 import sklearn
 import sklearn.cluster as skclust
 from scipy.sparse import csr_matrix, lil_matrix
-from hicexplorer.utilities import obs_exp_matrix
-from hicexplorer.utilities import convertNansToZeros, convertInfsToZeros
 from bisect import bisect_right
 from bisect import bisect_left
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 import matplotlib.gridspec as gridspec
 import matplotlib.cm as cm
-
+import umap
+import hdbscan
+from sklearn.mixture import GaussianMixture
+import seaborn as sns
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+from matplotlib.colors import LogNorm
+from matplotlib import use as mplt_use
+mplt_use('Agg')
+from matplotlib.ticker import FixedLocator
+from scipy.stats import pearsonr, spearmanr
+import random
 
 #import HiCExplorer
 from hicmatrix import HiCMatrix as hm
 from pybedtools import BedTool
 from hicexplorer._version import __version__
+from hicexplorer.utilities import obs_exp_matrix
+from hicexplorer.utilities import convertNansToZeros, convertInfsToZeros
 
 #get logger
 log = logging.getLogger(__name__)
@@ -90,6 +100,7 @@ def read_regions_bed(bed_file):
         bed_df.columns = get_regions_bed_col_names()
     else:
         bed_df.columns = get_regions_bed_col_names_5()
+        bed_df['Strand'] = bed_df['UnknownCol2']
     
     bed_df = bed_df.sort_values(by=["Chrom", "Start"])
 
@@ -132,9 +143,10 @@ def get_pairs(regions,min_distance=1000000,max_distance=20000000,resolution=1):
             current['pairChrom'] = row['Chrom']
             current['pairStart'] = row['Start']
             current['pairEnd'] = row['End']
-            pairs.append(current)            
+            pairs.append(current)
             
     pairs = pd.concat(pairs)
+    pairs.set_index(np.arange(0,pairs.shape[0]),inplace=True)
     
     return pairs
 
@@ -150,6 +162,7 @@ def get_submatrices(matrix,pairs,submatrix_size=9):
     submatrix_radius = math.floor(submatrix_size / 2)
     pairs['Index'] = np.zeros((len(pairs)), dtype='int')
     pairs['pairIndex'] = np.zeros((len(pairs)), dtype='int')
+    remove_rows = []
     
     for index,row in pairs.iterrows():
         
@@ -180,14 +193,18 @@ def get_submatrices(matrix,pairs,submatrix_size=9):
 
             #TODO: cases at the border of the matrix, for which the submatrix crosses over the edge of the matrix
             else:
-                submatrices.append(None)
+                #submatrices.append(np.full((up_i-lo_i,up_j-lo_j),0.0))
+                remove_rows.append(index)
             
         except ValueError:
             warnings.warn('position of interaction pair not found in matrix')
             print('warn')
-            row['Index'] = -1
-            row['pairIndex'] = -1
-            submatrices.append(None)
+            #row['Index'] = -1
+            #row['pairIndex'] = -1
+            #submatrices.append(np.full((up_i-lo_i,up_j-lo_j),0.0))
+            remove_rows.append(index)
+            
+    pairs = pairs.drop(index=remove_rows)
             
     return pairs,submatrices
         
@@ -277,14 +294,14 @@ def get_features(submatrices,center_size=0.2,corner_position=None,corner_size=2)
             return f
         
         else:
-            return np.zeros(shape_)
+            return np.full(shape_,np.nan)
     
     for i in range(0,len(submatrices)):
         features[i,:] = build_features(submatrices[i])
         
     return features
 
-def get_feature_matrix(pairs,features):
+def get_feature_matrix(pairs,features,dev_feature_type='per_region_flattened'):
     '''build features per region from features per interaction'''
     
     pair_positions = pairs[['pairChrom','pairStart','pairEnd']].rename(columns = {'pairChrom':'Chrom', 'pairStart': 'Start', 'pairEnd': 'End'}, inplace = False)
@@ -303,27 +320,62 @@ def get_feature_matrix(pairs,features):
     pairs = pairs.rename(columns = {'Chrom_x':'Chrom', 'Start_x': 'Start', 'End_x': 'End', 'featureIndex_x': 'featureIndex', 'featureIndex_y': 'pairFeatureIndex'}, inplace = False)
     pairs.set_index(np.arange(0,len(pairs)))
     
-    feature_matrix = np.zeros((len(indices_list),len(indices_list)*len(features[0])))
-    
-    for index,row in pairs.iterrows():
-        
-        i = row['featureIndex']
-        j = row['pairFeatureIndex']
-        i_f = row['featureIndex'] * len(features[0])
-        j_f = row['pairFeatureIndex'] * len(features[0])
-        i_f1 = (row['featureIndex'] + 1) * len(features[0])
-        j_f1 = (row['pairFeatureIndex'] + 1) * len(features[0])
-        
-        feature_matrix[i,j_f:j_f1] = features[index]
-        feature_matrix[j,i_f:i_f1] = features[index]
-        
-    return pairs, indices_list, feature_matrix    
+    if(dev_feature_type=='per_region_flattened'):
+        feature_matrix = np.zeros((len(indices_list),len(indices_list)*len(features[0])))
 
-def perform_clustering(features,k,cluster_algorithm=None):
+        for index,row in pairs.iterrows():
+
+            i = row['featureIndex']
+            j = row['pairFeatureIndex']
+            i_f = row['featureIndex'] * len(features[0])
+            j_f = row['pairFeatureIndex'] * len(features[0])
+            i_f1 = (row['featureIndex'] + 1) * len(features[0])
+            j_f1 = (row['pairFeatureIndex'] + 1) * len(features[0])
+
+            feature_matrix[i,j_f:j_f1] = features[index]
+            feature_matrix[j,i_f:i_f1] = features[index]
+            
+    else:
+        feature_matrix = np.zeros((len(indices_list),len(indices_list)))
+
+        for index,row in pairs.iterrows():
+
+            i = row['featureIndex']
+            j = row['pairFeatureIndex']
+
+            feature_matrix[i,j] = np.nanmean(features[index])
+            feature_matrix[i,j] = np.nanmean(features[index])
+        
+    return pairs, indices_list, feature_matrix
+
+def perform_clustering(features,k,cluster_algorithm='kmeans'):
     '''perform cluster algorithm on data'''
     
-    clustering = skclust.KMeans(n_clusters=k, random_state=0).fit(features)
-    cluster_labels = clustering.labels_
+    cluster_labels = None
+    
+    if(cluster_algorithm == 'kmeans'):
+        clustering = skclust.KMeans(n_clusters=k, random_state=0).fit(features)
+        cluster_labels = clustering.labels_
+    
+    elif(cluster_algorithm == 'agglomerative_hierarchical'):
+        clustering = skclust.AgglomerativeClustering(n_clusters=k).fit(features)
+        cluster_labels = clustering.labels_
+        
+    elif(cluster_algorithm == 'gaussian_mixture'):
+        clustering = GaussianMixture(n_components=k).fit(features)
+        cluster_labels = clustering.predict(features)
+        
+    elif(cluster_algorithm == 'hdbscan'):
+        clustering = hdbscan.HDBSCAN(min_cluster_size=10)
+        cluster_labels = clustering.fit_predict(features)
+        
+    elif(cluster_algorithm == 'community_detection'):
+        #reformulate as graph community detection problem using python igraph
+        raise NotImplementedError
+        
+    else:
+        raise ValueError
+
     return pd.Series(cluster_labels)
 
 def get_regions_bed_col_names():
@@ -343,8 +395,10 @@ def output_results(out_file_contact_pairs,pairs,indices_list,clusters):
     pairs['Strand'] = pairs['UnknownCol1']
     
     indices_list['Cluster'] = clusters
+        
     pairs = pd.merge(pairs, indices_list, how='inner', left_on=['Chrom','Start','End'], right_on=['Chrom','Start','End'])
     pairs = pairs[['Chrom','Start','End','UnknownCol1','UnknownCol2','Strand','pairChrom','pairStart','pairEnd','Cluster']]
+    
     pairs.to_csv(out_file_contact_pairs, sep='\t', header=None, index=False)
     
 def output_results_alt(out_file_contact_pairs,pairs,clusters):
@@ -358,26 +412,56 @@ def output_results_alt(out_file_contact_pairs,pairs,clusters):
     pairs = pairs[['Chrom','Start','End','UnknownCol1','UnknownCol2','Strand','pairChrom','pairStart','pairEnd','Cluster']]
     pairs.to_csv(out_file_contact_pairs, sep='\t', header=None, index=False)
 
-def perform_plotting_preprocessing(features,n_components=2):
+def perform_plotting_preprocessing(features,n_components=2,preprocessing_type=None):
     '''perform preprocessing for plotting'''
     
-    Sc = StandardScaler()
-    scaled = Sc.fit_transform(features)
-    pca = PCA(n_components)
-    pca.fit(scaled)
-    return pca.transform(scaled)
+    if(preprocessing_type is None):
+        Sc = StandardScaler()
+        scaled = Sc.fit_transform(features)
+        #pca = PCA(n_components)
+        #pca.fit(scaled)
+        #reduced = pca.transform(scaled)
 
-def perform_clustering_preprocessing(features):
+        um = umap.UMAP(n_components=n_components, init='random', random_state=0)
+        reduced = um.fit_transform(scaled)
+        
+    else:
+        reduced = features[:,0:n_components]
+    
+    return reduced
+
+def perform_clustering_preprocessing(features,preprocessing_type=None,n_components=20,umap_n_neighbours=20,umap_metric='braycurtis',umap_min_dist=0.5):
     '''perform preprocessing for clustering'''
     
-    return features
+    if(preprocessing_type == 'umap'):
+        return umap.UMAP(n_components=n_components,metric=umap_metric,n_neighbors=umap_n_neighbours,min_dist=umap_min_dist).fit_transform(features)
+            
+    if(preprocessing_type == 'pca'):
+        Sc = StandardScaler()
+        scaled = Sc.fit_transform(features)
+        return PCA(n_components=n_components).fit_transform(features)
     
-def plot_results(features,clusters,out_file_fig):
+    else:
+        return features
+    
+def plot_results(features,clusters,out_file_fig,scatter_plot_type='3d',preprocessing_type=None):
     '''plot clustering results'''
     
-    components = perform_plotting_preprocessing(features,n_components=2)
-    fig,ax = plt.subplots()
-    scatter = ax.scatter(components[:,0], components[:,1],c=clusters,cmap='Set3',alpha=0.8)
+    fig = plt.figure(dpi=150)
+    
+    ax = fig.add_subplot(projection=scatter_plot_type)
+    ax.set_xlabel('component 1')
+    ax.set_ylabel('component 2')
+    
+    if(scatter_plot_type == '3d'):
+        components = perform_plotting_preprocessing(features,n_components=3,preprocessing_type=preprocessing_type)
+        scatter = ax.scatter(components[:,0],components[:,1],components[:,2],c=clusters,cmap='Set3',alpha=0.8)
+        ax.set_zlabel('component 3')
+        
+    else:
+        components = perform_plotting_preprocessing(features,n_components=2,preprocessing_type=preprocessing_type)
+        scatter = ax.scatter(components[:,0], components[:,1],c=clusters,cmap='Set3',alpha=0.8)        
+    
     legend1 = ax.legend(*scatter.legend_elements(),loc="upper left", title="")
     ax.add_artist(legend1)
     
@@ -403,54 +487,80 @@ def find_ge(a, x):
         return i
     raise ValueError
     
-def plot_submatrices(submatrices, clusters, out_file_name):
-
+def plot_submatrices(submatrices, clusters, out_file_name,vmin=None,vmax=None,colormap='RdYlBu_r',plot_aggr_mode='mean'):
+    '''plot mean submatrices per cluster and for all regions'''
+    
     assert len(clusters) == len(submatrices)
     clusters = pd.Series(clusters)
     cluster_list = clusters.unique()
     cluster_list.sort()
     aggr_submatrices = []
+    
     submatrices = np.array(submatrices)
     clusters = clusters.to_numpy()
-    mode = 'mean'
     M_half = int((submatrices[0].shape[0] - 1) // 2)
     
     for c in cluster_list:
         cluster_indices = clusters == c
         cluster_submatrices = submatrices[cluster_indices]
         
-        if(mode == 'median'):
-            aggr_submatrix = np.median(cluster_submatrices, axis=0)
+        if(plot_aggr_mode == 'median'):
+            aggr_submatrix = np.nanmedian(cluster_submatrices, axis=0)
         else:
-            aggr_submatrix = np.mean(cluster_submatrices, axis=0)
+            aggr_submatrix = np.nanmean(cluster_submatrices, axis=0)
             
         aggr_submatrices.append(aggr_submatrix)
     
     
-    if(mode == 'median'):
-        aggr_submatrix_all = np.median(submatrices, axis=0)
+    if(plot_aggr_mode == 'median'):
+        aggr_submatrix_all = np.nanmedian(submatrices, axis=0)
     else:
-        aggr_submatrix_all = np.mean(submatrices, axis=0)
+        aggr_submatrix_all = np.nanmean(submatrices, axis=0)
     
     assert len(aggr_submatrices) == len(cluster_list)
     
     fig = plt.figure(figsize=(5.5 * (len(cluster_list) + 1), 5.5))
-    gs = gridspec.GridSpec(1,(len(cluster_list) + 1))
+    gs = gridspec.GridSpec(1,(len(cluster_list) + 1),wspace=0.1, hspace=0.1)
 
     gs.update(wspace=0.01, hspace=0.2)
 
     for cluster_number in range(0,len(aggr_submatrices)):
-            title = "cluster_{}".format(cluster_number + 1)
+            title = "cluster_{}".format(cluster_number)
             ax = plt.subplot(gs[0,cluster_number])
             ax.set_title(title)
-            img = ax.imshow(aggr_submatrices[cluster_number], aspect='equal',interpolation='nearest',extent=[-M_half, M_half + 1, -M_half, M_half + 1])
+            
+            divider = make_axes_locatable(ax)
+            ax_cb = divider.new_vertical(size="5%", pad=0.3,pack_start=True)
+            fig = ax.get_figure()
+            fig.add_axes(ax_cb)
+            img = ax.imshow(aggr_submatrices[cluster_number], aspect='equal',interpolation='nearest',extent=[-M_half, M_half + 1, -M_half, M_half + 1],cmap = colormap,vmin=vmin,vmax=vmax)
+
+            mappableObject = plt.cm.ScalarMappable(cmap = colormap)
+            mappableObject.set_array(aggr_submatrices[cluster_number])
+            plt.colorbar(mappableObject, cax = ax_cb,orientation='horizontal')
+            ax_cb.xaxis.tick_bottom()
+            ax_cb.xaxis.set_tick_params(labelbottom=True)
+            
+
     
     title = 'all'
     ax = plt.subplot(gs[0,len(cluster_list)])
-    ax.set_title(title)    
-    img = ax.imshow(aggr_submatrix_all, aspect='equal',interpolation='nearest',extent=[-M_half, M_half + 1, -M_half, M_half + 1])
+    ax.set_title(title)
+    
+    divider = make_axes_locatable(ax)
+    ax_cb = divider.new_vertical(size="5%", pad=0.3,pack_start=True)
+    fig = ax.get_figure()
+    fig.add_axes(ax_cb)
+    
+    img = ax.imshow(aggr_submatrix_all, aspect='equal',interpolation='nearest',extent=[-M_half, M_half + 1, -M_half, M_half + 1],cmap = colormap,vmin=vmin,vmax=vmax)
+    mappableObject = plt.cm.ScalarMappable(cmap = colormap)
+    mappableObject.set_array(aggr_submatrix_all)
+    plt.colorbar(mappableObject, cax = ax_cb, orientation='horizontal')
+    ax_cb.xaxis.tick_bottom()
+    ax_cb.xaxis.set_tick_params(labelbottom=True)    
     plt.savefig(out_file_name, dpi=300)
     #plt.show()
+    plt.close()
     
 def region_to_pair_cluster_labels(pairs,indices_list,clusters):
     '''clusters per region to clusters per pair'''
@@ -459,7 +569,229 @@ def region_to_pair_cluster_labels(pairs,indices_list,clusters):
     o = pd.merge(pairs, indices_list, how='inner', left_on=['Chrom','Start','End'], right_on=['Chrom','Start','End']) 
     
     return o['Cluster']
+
+def outlier_cropping_and_transformation(X,min_value=None,max_value=None,transform=None):
+    '''crop statistical outliers and transform '''
     
+    assert min_value is None or max_value is None or min_value <= max_value
+    
+    def oc_t_np(x):
+        if(not max_value is None):
+            np.minimum(x,max_value,out=x)
+
+        if(not min_value is None):
+            np.maximum(x,min_value,out=x)
+
+        if(transform == 'log1p'):
+            np.log1p(x,out=X)
+
+        return x
+    
+    if(isinstance(X,list)):
+        X = [oc_t_np(x) for x in X]
+    else:
+        X = oc_t_np(X)
+        
+    return X
+
+def plot_density(np_array,out_file_prefix):
+        fig = plt.figure(figsize =(10, 7))
+        #ax = fig.add_axes([0,0,1,1])
+        fl = np_array.flatten()
+        fl_size = fl.shape[0]
+        fl_nz = fl[fl > 0]
+        frac_zero = str(fl_nz.shape[0] / fl.shape[0])
+        l = min(4,len(frac_zero))
+        frac_zero = frac_zero[0:l]
+        title = 'density of feature values'
+        
+        sns.set_style('whitegrid')
+        sns_plot = sns.kdeplot(fl, bw=0.5, cut=0)
+        sns_plot.set(title=title)
+        
+        fig = sns_plot.get_figure()
+        fig.savefig(out_file_prefix + '_feature_density.png')
+        
+        plt.boxplot(fl_nz)
+        plt.title('boxplot of non-zero feature values; proportion of zeros: ' + frac_zero)
+        plt.savefig(out_file_prefix + '_feature_boxplot.png', dpi=300)
+        plt.close()
+
+def plot_diagnostic_heatmaps(submatrices,clusters,out_file_prefix,vmin=None,vmax=None,colormap='RdYlBu_r',dpi=300,transform='log1p'):
+
+    M_half = int((submatrices[0].shape[0] - 1) // 2)
+    #num_chromosomes = len(chrom_diagonals)
+    
+    vmax_heat = vmax
+    if vmax_heat is not None:
+        vmax_heat *= 5
+
+    vmin_heat = vmin
+    if vmin_heat is not None:
+        vmin_heat *= 5
+    else:
+        vmin_heat = 0
+        
+    norm = None
+    
+    if(transform == 'log1p'):
+        norm = LogNorm()
+        vmin_heat = None
+        vmax_heat = None
+        
+    #num_plots = len(chrom_diagonals)
+    num_plots = 1
+    fig = plt.figure(figsize=(num_plots * 4, 20))
+
+    gs0 = gridspec.GridSpec(2, num_plots + 1, width_ratios=[10] * num_plots + [0.5], height_ratios=[1, 5],
+                            wspace=0.1, hspace=0.1)
+
+    gs_list = []
+    #for idx, (chrom_name, values) in enumerate(chrom_diagonals.items()):
+        #try:
+            #heatmap = np.asarray(np.vstack(values))
+        #except ValueError:
+            #log.error("Error computing diagnostic heatmap for chrom: {}".format(chrom_name))
+            #continue
+
+    # get size of each cluster for the given chrom
+    #clust_len = [(len(v)) for v in cluster_ids[chrom_name]]
+    
+    diagonales = np.zeros((len(submatrices),np.diagonal(submatrices[0]).shape[0]))
+    
+    for i in range(0,len(submatrices)):
+        diagonales[i,:] = np.diagonal(submatrices[i])
+
+    # prepare layout
+    assert len(clusters) == len(submatrices)
+    clusters = pd.Series(clusters)
+    cluster_list = clusters.unique()
+    cluster_list.sort()
+    clusters = clusters.to_numpy()
+    idx = 0
+    clus_len = [len(clusters[clusters == c]) for c in cluster_list]
+    
+    gs_list.append(gridspec.GridSpecFromSubplotSpec(len(cluster_list), 1,
+                                                    subplot_spec=gs0[1, idx],
+                                                    height_ratios=clus_len,
+                                                    hspace=0.03))
+    summary_plot_ax = plt.subplot(gs0[0, idx])
+    summary_plot_ax.set_title('heatmaps')
+
+    for c in cluster_list:
+        cluster_indices = clusters == c
+        heatmap_to_plot = diagonales[cluster_indices,:]
+        title = "cluster_{}".format(c)
+        
+        # sort by the value at the center of the rows
+        order = np.argsort(heatmap_to_plot[:, M_half])[::-1]
+        heatmap_to_plot = heatmap_to_plot[order, :]
+        
+        if(transform == 'log1p'):
+            heatmap_to_plot = heatmap_to_plot + 1
+
+        # add line to summary plot ax
+        y_values = heatmap_to_plot.mean(axis=0)
+        x_values = np.arange(len(y_values)) - M_half
+        cluster_label = "cluster_{}".format(c)
+        summary_plot_ax.plot(x_values, y_values, label=c)
+        ax = plt.subplot(gs_list[-1][c, 0])
+        ax.set_yticks([])
+        #if num_chromosomes > 1:
+        #    ax.set_ylabel(c)
+
+        #if c < num_chromosomes - 1:
+        ax.set_xticks([])
+
+#        heat_fig = ax.pcolormesh(heatmap_to_plot,
+#                            vmax=vmax_heat, vmin=vmin_heat,
+#                            cmap=colormap, norm=norm)
+        
+        heat_fig = ax.imshow(heatmap_to_plot, aspect='auto',
+                             interpolation='nearest',
+                             cmap=colormap,
+                             origin='upper', norm=norm,
+                             vmax=vmax_heat, vmin=vmin_heat,
+                             extent=[-M_half, M_half + 1,
+                                     0, heatmap_to_plot.shape[0]])
+
+    summary_plot_ax.legend(ncol=1, frameon=False, markerscale=0.5)
+
+    cbar_x = plt.subplot(gs0[1, -1])
+    fig.colorbar(heat_fig, cax=cbar_x, orientation='vertical')
+
+    file_name = out_file_prefix + '_heatmap.png'
+    log.info('Heatmap file saved under: {}'.format(file_name))
+    plt.savefig(file_name, dpi=dpi, bbox_inches='tight')
+    plt.close()
+    
+def get_random_regions(amount,region_start,region_end,chromosome,region_size=1):
+    '''create a bed file with random regions'''
+    
+    samples = np.array(random.samples(range(region_start,region_end),amount))
+    cols = {'Chrom': pd.Series([], dtype='str'),
+            'Start': pd.Series([], dtype='int'),
+            'End': pd.Series([], dtype='int'),
+            'UnknownCol1': pd.Series([], dtype='str'),
+            'UnknownCol2': pd.Series([], dtype='str'),
+            'Strand': pd.Series([], dtype='str')}
+    
+    random_bed_file = pd.DataFrame(cols)
+    random_bed_file['Chrom'] = [chromosome] * amount
+    random_bed_file['Start'] = samples
+    random_bed_file['End'] = samples + region_size
+    random_bed_file['UnknownCol1'] = np.zeros(samples.shape)
+    random_bed_file['UnknownCol2'] = np.zeros(samples.shape)
+    random_bed_file['Strand'] = np.zeros(samples.shape)
+    
+    return random_bed_file
+    
+def mix_with_random_regions(regions,region_start=None,region_end=None):
+    '''introduce random regions to an input bed file'''
+    
+    n_rows = int(regions.shape[0]*1.1)
+    region_size = int(regions.median(regions['End'] - regions['Start']))
+    chromosome = regions['Chrom'][0]
+    regions.sort_values(by=["Chrom", "Start"],inplace=True)
+    
+    if(region_start is None):
+        region_start = regions['Start'][0]
+    
+    if(region_end is None):
+        region_end = regions['Start'][-1]
+    
+    random_bed_file = get_random_regions(n_rows,region_start,region_end,chromosome,region_size=region_size)
+    
+    random_bed_file['is_random'] = True
+    regions['is_random'] = False
+    
+    regions.append(random_bed_file)
+    regions.sort_values(by=["Chrom", "Start"],inplace=True)
+    regions.drop_duplicates(subset=["Chrom", "Start"],inplace=True)
+    regions.set_index(np.arange(0,regions.shape[0]),inplace=True)
+    
+    return regions[get_regions_bed_col_names()],regions['is_random']
+
+def dev_print_infos(is_random,pairs,indices_list,clusters):
+    
+    indices_list = indices_list.copy(deep=True)
+    pairs = pairs.copy(deep=True)
+    
+    indices_list['Cluster'] = clusters
+    indices_list['isRandom'] = is_random
+    
+    pairs = pd.merge(pairs, indices_list, how='inner', left_on=['Chrom','Start','End'], right_on=['Chrom','Start','End'])
+    pairs = pd.merge(pairs, indices_list, how='inner', left_on=['pairChrom','pairStart','pairEnd'], right_on=['Chrom','Start','End'],suffixes=(None,'_pair'))
+    
+    pairs['hasOneRandom'] = pairs['isRandom'] | pairs['isRandom_pair']
+    
+    conditions = [pairs['Cluster'] == pairs['Cluster_pair']]
+    choices = [True,False]
+    pairs['hasSameCluster'] = np.select(conditions,choices,default=False)
+    
+    for index,row in pairs.iterrows():
+        print('r: ' + str(row['isRandom']) + ' ' + str(row['isRandom_pair']) + ' c: ' + str(row['Cluster']) + ' ' + str(row['Cluster_pair']))
+        
 #define parser and description
 
 def parse_arguments(args=None):
@@ -544,31 +876,138 @@ $ hicClusterContacts
     parserOpt.add_argument('--submatrixSize',
                            help='size of submatrices',
                            type=int,
-                           default=9)
+                           default=25)
     
     parserOpt.add_argument('--clusterAlgorithm',
+                           choices=[
+                               'kmeans',
+                               'agglomerative_hierarchical',
+                               'gaussian_mixture',
+                               'community_detection',
+                               'hdbscan'
+                           ],
                            help='cluster algorithm to use for computation',
                            type=str,
-                           default=None)
+                           default='kmeans')
 
     parserOpt.add_argument('--threads', '-t',
                            help='number of threads used',
                            default=4,
                            type=int)
+    
+    parserOpt.add_argument('--devFeatureType',
+                           choices=[
+                               'per_region_aggregated',
+                               'per_pair_flattened',
+                               'per_region_flattened'
+                           ],
+                           default='per_pair_flattened',
+                           help='for development: use features per region or per pair')
+    
+    parserOpt.add_argument('--scatterPlotType',
+                           choices=[
+                               '2d',
+                               '3d'
+                           ],
+                           default='3d',
+                           help='choose 2D or 3D scatter plot')
+    
+    parserOpt.add_argument('--vmin',
+                           default=None,
+                           help='set minimum value for output plot colormap')
+    
+    parserOpt.add_argument('--vmax',
+                           default=None,
+                           help='set maximum value for output plot colormap')
+    
+    parserOpt.add_argument('--colormap',
+                           default='RdYlBu_r',
+                           type=str,
+                           help='set output plot colormap')
+    
+    parserOpt.add_argument('--plotAggrMode',
+                           choices=[
+                               'mean',
+                               'median'
+                           ],
+                           default='mean',
+                           help='whether plotted submatrices use mean or median aggregation')
+    
+    parserOpt.add_argument('--devPreprocessingType',
+                           choices=[
+                               'pca',
+                               'umap',
+                               None
+                           ],
+                           default=None,
+                           help='choose clustering preprocessing')
+    
+    parserOpt.add_argument('--devNComponents',
+                           default=20,
+                           type=int,
+                           help='number of components for pre-processing')
+    
+    parserOpt.add_argument('--devUmapNNeighbours',
+                           default=20,
+                           type=int,
+                           help='umap hyperparameter')
+    
+    parserOpt.add_argument('--devUmapMetric',
+                           choices=[
+                            'euclidean',
+                            'manhattan',
+                            'chebyshev',
+                            'minkowski',
+                            'canberra',
+                            'braycurtis',
+                            'haversine',
+                            'mahalanobis',
+                            'wminkowski',
+                            'seuclidean',
+                            'cosine',
+                            'correlation'
+                           ],
+                           default='minkowski',
+                           help='number of components for pre-processing')
+    
+    parserOpt.add_argument('--devUmapMinDist',
+                           default=0.5,
+                           type=float,
+                           help='umap hyperparameter')
+    
+    parserOpt.add_argument('--devOutlierCroppingMin',
+                           default=None,
+                           type=int,
+                           help='min value for outlier cropping')
+    
+    parserOpt.add_argument('--devOutlierCroppingMax',
+                           default=None,
+                           type=int,Note: If you use the same seed value twice you will get the same random number twice. See example below
+                           help='max value for outlier cropping')
+    
+    parserOpt.add_argument('--devMixInRandomRegions',
+                           default=False,
+                           type=bool,
+                           help='introduce random region to the input')
+    
+    parserOpt.add_argument('--randomSeed',
+                           default=None,
+                           type=int,
+                           help='set random seed')
+    
+    parserOpt.add_argument('--transform',
+                           default='log1p',
+                           choices=[
+                            None,
+                            'log1p'
+                           ],
+                           help='Chooses whether to transform the submatrices before clustering')    
 
     parserOpt.add_argument("--help", "-h", action="help",
                            help="show this help message and exit")
 
     parserOpt.add_argument('--version', action='version',
                            version='%(prog)s {}'.format(__version__))
-    
-    parserOpt.add_argument('--devFeatureType',
-                           choices=[
-                               'per_region',
-                               'per_pair'
-                           ],
-                           default='per_region',
-                           help='for development: use features per region or per pair')
 
     return parser
     
@@ -587,13 +1026,27 @@ def main(args=None):
     cluster_algorithm = args.clusterAlgorithm
     k = args.numberOfOutputClusters
     dev_feature_type = args.devFeatureType
+    preprocessing_type = args.devPreprocessingType
+    outlier_min = args.devOutlierCroppingMin
+    outlier_max = args.devOutlierCroppingMax    
     
     out_file_contact_pairs = args.outFilePrefix + 'contact_pairs.bed'
     out_file_fig = args.outFilePrefix + 'scatter.png'
+    out_file_prefix = args.outFilePrefix
     
     resolution = 1
     corner_position = 'upper_left'
     corner_size = 2
+    
+    if(not args.randomSeed is None):
+        random.seed(args.randomSeed)
+    
+    #either by input, range normalization or for each submatrix itself
+    vmin = args.vmin
+    vmax = args.vmax
+    colormap = args.colormap
+    plot_aggr_mode = args.plotAggrMode
+    scatter_plot_type = args.scatterPlotType
     
     #check for faulty parameters
     
@@ -605,6 +1058,11 @@ def main(args=None):
     print('reading bed file')
     #ingest bed file
     regions = read_regions_bed(bed_file)
+    
+    if(args.devMixInRandomRegions):
+        bed_file,is_random = mix_with_random_regions(bed_file,region_start=None,region_end=None)
+    else:
+        is_random = None
     
     print('normalizing matrix file')
     #normalize matrix file(s)
@@ -618,35 +1076,43 @@ def main(args=None):
     #cut out submatrices
     pairs, submatrices = get_submatrices(matrix,pairs,submatrix_size)
     
+    submatrices = outlier_cropping_and_transformation(submatrices,min_value=outlier_min,max_value=outlier_max)
+    
     print('aggregating features for clustering')
     #aggregate features from submatrices
     features = get_features(submatrices,center_size=center_size,corner_position=corner_position,corner_size=corner_size)
+    plot_density(features,out_file_prefix)
     
-    if(dev_feature_type == 'per_region'):
-        pairs, indices_list, features = get_feature_matrix(pairs,features)
+    if(dev_feature_type == 'per_region_flattened' or dev_feature_type == 'per_region_aggregated'):
+        pairs, indices_list, features = get_feature_matrix(pairs,features,dev_feature_type = dev_feature_type)
             
         print('clustering')
         #cluster submatrices
+        features = perform_clustering_preprocessing(features,preprocessing_type=preprocessing_type)
         clusters = perform_clustering(features,k,cluster_algorithm=cluster_algorithm)
         clusters_per_interactions = region_to_pair_cluster_labels(pairs,indices_list,clusters)
         
         print('writing results to file')
-        output_results(out_file_contact_pairs,pairs,indices_list,clusters)
+        output_results(out_file_contact_pairs,pairs,indices_list,clusters,random_regions=is_random)
         
     else:
         print('clustering')
         #cluster submatrices
+        features = perform_clustering_preprocessing(features,preprocessing_type=preprocessing_type)
         clusters = perform_clustering(features,k,cluster_algorithm=cluster_algorithm)
         clusters_per_interactions = clusters
         
         print('writing results to file')
-        output_results_alt(out_file_contact_pairs,pairs,clusters)
+        output_results_alt(out_file_contact_pairs,pairs,clusters,random_regions=is_random)
     
     print('plotting results in scatter plot')
-    plot_results(features,clusters,out_file_fig)
+    plot_results(features,clusters,out_file_fig,scatter_plot_type = scatter_plot_type,preprocessing_type=preprocessing_type)
     
     print('plot submatrices')
-    plot_submatrices(submatrices,clusters_per_interactions,args.outFilePrefix + 'mean_submatrices.png')
+    plot_submatrices(submatrices,clusters_per_interactions,args.outFilePrefix + 'mean_submatrices.png',vmin=vmin,vmax=vmax,colormap=colormap,plot_aggr_mode=plot_aggr_mode)
+    plot_diagnostic_heatmaps(submatrices,clusters_per_interactions,args.outFilePrefix)
     
+    #corr_matrix = compute_correlation(submatrices,clusters_per_interactions,out_file_name=args.outFilePrefix + 'correlation_scatter.png')
+    #plot_correlation(corr_matrix,clusters_per_interactions,args.outFilePrefix + 'correlation_heatmap.png', vmax=None,vmin=None, image_format=None)
     
     print('Done')
