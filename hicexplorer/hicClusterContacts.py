@@ -14,6 +14,7 @@ from bisect import bisect_right
 from bisect import bisect_left
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
+from sklearn import metrics
 import matplotlib.gridspec as gridspec
 import matplotlib.cm as cm
 import umap
@@ -23,7 +24,6 @@ import seaborn as sns
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from matplotlib.colors import LogNorm
 from matplotlib import use as mplt_use
-mplt_use('Agg')
 from matplotlib.ticker import FixedLocator
 from scipy.stats import pearsonr, spearmanr
 import random
@@ -36,6 +36,7 @@ from hicexplorer.utilities import obs_exp_matrix
 from hicexplorer.utilities import convertNansToZeros, convertInfsToZeros
 
 #get logger
+mplt_use('Agg')
 log = logging.getLogger(__name__)
 
 def read_matrix_file(matrix_file, pChromosome):
@@ -105,9 +106,10 @@ def read_regions_bed(bed_file):
     bed_df = bed_df.sort_values(by=["Chrom", "Start"])
 
     if(bed_df.size < 1):
-        raise ValueError('empty domain file passed')
+        raise ValueError('empty bed file passed')
         
     bed_df.set_index(np.arange(0,bed_df.shape[0]),inplace=True)
+    bed_df['RegionIndex'] = np.arange(0,bed_df.shape[0])
 
     return bed_df
 
@@ -143,14 +145,21 @@ def get_pairs(regions,min_distance=1000000,max_distance=20000000,resolution=1):
             current['pairChrom'] = row['Chrom']
             current['pairStart'] = row['Start']
             current['pairEnd'] = row['End']
+            current['pairRegionIndex'] = row['RegionIndex']
+            
+            if 'TestLabel' in chr_regions.columns:
+                current['pairTestLabel'] = row['TestLabel']
+            
             pairs.append(current)
             
     pairs = pd.concat(pairs)
     pairs.set_index(np.arange(0,pairs.shape[0]),inplace=True)
+    pairs['MatrixIndex'] = np.zeros((len(pairs)), dtype='int')
+    pairs['pairMatrixIndex'] = np.zeros((len(pairs)), dtype='int')
     
     return pairs
 
-def get_submatrices(matrix,pairs,submatrix_size=9):
+def get_submatrices(matrix,regions,pairs,submatrix_size=9):
     """collect submatrices for every pair of regions"""
     
     #get submatrices for these pairs
@@ -160,8 +169,6 @@ def get_submatrices(matrix,pairs,submatrix_size=9):
     chromosomes = pairs['Chrom'].unique()
     chr_pos = dict(zip(chromosomes,map(matrix.getChrBinRange,chromosomes)))
     submatrix_radius = math.floor(submatrix_size / 2)
-    pairs['Index'] = np.zeros((len(pairs)), dtype='int')
-    pairs['pairIndex'] = np.zeros((len(pairs)), dtype='int')
     remove_rows = []
     
     for index,row in pairs.iterrows():
@@ -179,8 +186,8 @@ def get_submatrices(matrix,pairs,submatrix_size=9):
             
             log.debug('position: ' + str(i) + ' ' + str(j) + ' in matrix: ' + str(matrix.matrix.shape[0]))
             
-            row['Index'] = i
-            row['pairIndex'] = j
+            row['MatrixIndex'] = i
+            row['pairMatrixIndex'] = j
 
             #normal cases inside matrix
             if(i >= submatrix_size and j >= submatrix_size and i < matrix.matrix.shape[0] - submatrix_size and j < matrix.matrix.shape[0] - submatrix_size):
@@ -195,19 +202,35 @@ def get_submatrices(matrix,pairs,submatrix_size=9):
             else:
                 #submatrices.append(np.full((up_i-lo_i,up_j-lo_j),0.0))
                 remove_rows.append(index)
+                log.warn('position of interaction pair at the edge of matrix')
             
         except ValueError:
-            warnings.warn('position of interaction pair not found in matrix')
-            print('warn')
+            log.warn('position of interaction pair not found in matrix')
             #row['Index'] = -1
             #row['pairIndex'] = -1
             #submatrices.append(np.full((up_i-lo_i,up_j-lo_j),0.0))
             remove_rows.append(index)
             
+    #drop all regions which cannot be clustered, because they are not (fully) contained in matrix
     pairs = pairs.drop(index=remove_rows)
-            
-    return pairs,submatrices
-        
+    regions = regions[regions['RegionIndex'].isin(pd.concat([pairs['RegionIndex'],pairs['pairRegionIndex']]))]
+    
+    regions.rename(columns = {'RegionIndex':'RegionIndexOld'}, inplace = True)
+    regions['RegionIndex'] = np.arange(0,regions.shape[0])
+    regions['pairRegionIndexOld'] = regions['RegionIndexOld']
+    regions['pairRegionIndex'] = regions['RegionIndex']
+    
+    pairs.rename(columns = {'RegionIndex':'RegionIndexOld'}, inplace = True)
+    pairs.rename(columns = {'pairRegionIndex':'pairRegionIndexOld'}, inplace = True)
+    
+    pairs = pd.merge(pairs, regions[['RegionIndexOld','RegionIndex']], how='inner', left_on=['RegionIndexOld'], right_on=['RegionIndexOld'])
+    pairs = pd.merge(pairs, regions[['pairRegionIndexOld','pairRegionIndex']], how='inner', left_on=['pairRegionIndexOld'], right_on=['pairRegionIndexOld'])
+    
+    regions.drop(columns=['RegionIndexOld','pairRegionIndexOld','pairRegionIndex'])
+    pairs.drop(columns=['RegionIndexOld','pairRegionIndexOld'])
+    
+    return regions,pairs,submatrices
+    
 def get_positions(matrix):
     '''get positions for matrix'''
 
@@ -300,53 +323,48 @@ def get_features(submatrices,center_size=0.2,corner_position=None,corner_size=2)
         features[i,:] = build_features(submatrices[i])
         
     return features
+    
+#def get_indices_list(pairs):
+#    '''get indices of regions'''
 
-def get_feature_matrix(pairs,features,dev_feature_type='per_region_flattened'):
+#    pair_positions = pairs[['pairChrom','pairStart','pairEnd']].rename(columns = {'pairChrom':'Chrom', 'pairStart': 'Start', 'pairEnd': 'End'}, inplace = False)
+#    indices_list = pd.concat([pairs[['Chrom','Start','End']].copy(),pair_positions])
+#    indices_list = indices_list.drop_duplicates(subset=['Chrom','Start']).sort_values(by=["Chrom","Start"])
+#    indices_list['featureIndex'] = np.arange(len(indices_list['Chrom']))
+#    indices_list.set_index(np.arange(0,len(indices_list)))
+    
+#    return indices_list
+
+def get_feature_matrix(pairs,features,regions,dev_feature_type='per_region_flattened'):
     '''build features per region from features per interaction'''
     
-    pair_positions = pairs[['pairChrom','pairStart','pairEnd']].rename(columns = {'pairChrom':'Chrom', 'pairStart': 'Start', 'pairEnd': 'End'}, inplace = False)
-    indices_list = pd.concat([pairs[['Chrom','Start','End']].copy(),pair_positions])
-    indices_list = indices_list.drop_duplicates(subset=['Chrom','Start']).sort_values(by=["Chrom","Start"])
-    indices_list['featureIndex'] = np.arange(len(indices_list['Chrom']))
-    indices_list.set_index(np.arange(0,len(indices_list)))
-
-    pairs = pd.merge(pairs, indices_list, how='inner', left_on=['Chrom','Start','End'], right_on=['Chrom','Start','End'])
-    pairs = pd.merge(pairs, indices_list, how='inner', left_on=['pairChrom','pairStart','pairEnd'], right_on=['Chrom','Start','End'])
-    
-    #TODO
-    pairs['Strand'] = pairs['UnknownCol1']
-    
-    pairs = pairs[['Chrom_x','Start_x','End_x','UnknownCol1','UnknownCol2','Strand','pairChrom','pairStart','pairEnd','Index','pairIndex','featureIndex_x','featureIndex_y']]
-    pairs = pairs.rename(columns = {'Chrom_x':'Chrom', 'Start_x': 'Start', 'End_x': 'End', 'featureIndex_x': 'featureIndex', 'featureIndex_y': 'pairFeatureIndex'}, inplace = False)
-    pairs.set_index(np.arange(0,len(pairs)))
-    
     if(dev_feature_type=='per_region_flattened'):
-        feature_matrix = np.zeros((len(indices_list),len(indices_list)*len(features[0])))
+        feature_matrix = np.zeros((regions.shape[0],regions.shape[0]*len(features[0])))
 
         for index,row in pairs.iterrows():
 
-            i = row['featureIndex']
-            j = row['pairFeatureIndex']
-            i_f = row['featureIndex'] * len(features[0])
-            j_f = row['pairFeatureIndex'] * len(features[0])
-            i_f1 = (row['featureIndex'] + 1) * len(features[0])
-            j_f1 = (row['pairFeatureIndex'] + 1) * len(features[0])
+            i = row['RegionIndex']
+            j = row['pairRegionIndex']
+            i_f = row['RegionIndex'] * len(features[0])
+            j_f = row['pairRegionIndex'] * len(features[0])
+            i_f1 = (row['RegionIndex'] + 1) * len(features[0])
+            j_f1 = (row['pairRegionIndex'] + 1) * len(features[0])
 
             feature_matrix[i,j_f:j_f1] = features[index]
             feature_matrix[j,i_f:i_f1] = features[index]
             
     else:
-        feature_matrix = np.zeros((len(indices_list),len(indices_list)))
+        feature_matrix = np.zeros((regions.shape[0],regions.shape[0]))
 
         for index,row in pairs.iterrows():
 
-            i = row['featureIndex']
-            j = row['pairFeatureIndex']
+            i = row['RegionIndex']
+            j = row['pairRegionIndex']
 
             feature_matrix[i,j] = np.nanmean(features[index])
             feature_matrix[i,j] = np.nanmean(features[index])
         
-    return pairs, indices_list, feature_matrix
+    return feature_matrix
 
 def perform_clustering(features,k,cluster_algorithm='kmeans'):
     '''perform cluster algorithm on data'''
@@ -388,29 +406,14 @@ def get_regions_bed_col_names_5():
 
     return ['Chrom', 'Start', 'End', 'UnknownCol1', 'UnknownCol2']
 
-def output_results(out_file_contact_pairs,pairs,indices_list,clusters):
+def output_results(out_file_contact_pairs,pairs):
     '''output results to bed file'''
 
     #TODO
     pairs['Strand'] = pairs['UnknownCol1']
     
-    indices_list['Cluster'] = clusters
-        
-    pairs = pd.merge(pairs, indices_list, how='inner', left_on=['Chrom','Start','End'], right_on=['Chrom','Start','End'])
-    pairs = pairs[['Chrom','Start','End','UnknownCol1','UnknownCol2','Strand','pairChrom','pairStart','pairEnd','Cluster']]
-    
-    pairs.to_csv(out_file_contact_pairs, sep='\t', header=None, index=False)
-    
-def output_results_alt(out_file_contact_pairs,pairs,clusters):
-    '''output results to bed file'''
-
-    pairs['Cluster'] = clusters
-    
-    #TODO
-    pairs['Strand'] = pairs['UnknownCol1']
-    
-    pairs = pairs[['Chrom','Start','End','UnknownCol1','UnknownCol2','Strand','pairChrom','pairStart','pairEnd','Cluster']]
-    pairs.to_csv(out_file_contact_pairs, sep='\t', header=None, index=False)
+    pairs_out = pairs[['Chrom','Start','End','UnknownCol1','UnknownCol2','Strand','pairChrom','pairStart','pairEnd','Cluster']]
+    pairs_out.to_csv(out_file_contact_pairs, sep='\t', header=None, index=False)
 
 def perform_plotting_preprocessing(features,n_components=2,preprocessing_type=None):
     '''perform preprocessing for plotting'''
@@ -418,12 +421,12 @@ def perform_plotting_preprocessing(features,n_components=2,preprocessing_type=No
     if(preprocessing_type is None):
         Sc = StandardScaler()
         scaled = Sc.fit_transform(features)
-        #pca = PCA(n_components)
-        #pca.fit(scaled)
-        #reduced = pca.transform(scaled)
+        pca = PCA(n_components)
+        pca.fit(scaled)
+        reduced = pca.transform(scaled)
 
-        um = umap.UMAP(n_components=n_components, init='random', random_state=0)
-        reduced = um.fit_transform(scaled)
+        #um = umap.UMAP(n_components=n_components, init='random', random_state=0)
+        #reduced = um.fit_transform(scaled)
         
     else:
         reduced = features[:,0:n_components]
@@ -562,13 +565,15 @@ def plot_submatrices(submatrices, clusters, out_file_name,vmin=None,vmax=None,co
     #plt.show()
     plt.close()
     
-def region_to_pair_cluster_labels(pairs,indices_list,clusters):
-    '''clusters per region to clusters per pair'''
+def region_to_pair_labels(pairs,labels,col_name):
+    '''merge region labels to pairs'''
     
-    indices_list['Cluster'] = clusters
-    o = pd.merge(pairs, indices_list, how='inner', left_on=['Chrom','Start','End'], right_on=['Chrom','Start','End']) 
+    cl_df = pd.DataFrame(columns=[col_name])
+    cl_df[col_name] = labels
+    cl_df['RegionIndex'] = np.arange(0,labels.shape[0])
+    o = pd.merge(pairs[['RegionIndex']], cl_df, how='inner', left_on=['RegionIndex'], right_on=['RegionIndex']) 
     
-    return o['Cluster']
+    return o[col_name]
 
 def outlier_cropping_and_transformation(X,min_value=None,max_value=None,transform=None):
     '''crop statistical outliers and transform '''
@@ -595,29 +600,33 @@ def outlier_cropping_and_transformation(X,min_value=None,max_value=None,transfor
     return X
 
 def plot_density(np_array,out_file_prefix):
-        fig = plt.figure(figsize =(10, 7))
-        #ax = fig.add_axes([0,0,1,1])
-        fl = np_array.flatten()
-        fl_size = fl.shape[0]
-        fl_nz = fl[fl > 0]
-        frac_zero = str(fl_nz.shape[0] / fl.shape[0])
-        l = min(4,len(frac_zero))
-        frac_zero = frac_zero[0:l]
-        title = 'density of feature values'
-        
-        sns.set_style('whitegrid')
-        sns_plot = sns.kdeplot(fl, bw=0.5, cut=0)
-        sns_plot.set(title=title)
-        
-        fig = sns_plot.get_figure()
-        fig.savefig(out_file_prefix + '_feature_density.png')
-        
-        plt.boxplot(fl_nz)
-        plt.title('boxplot of non-zero feature values; proportion of zeros: ' + frac_zero)
-        plt.savefig(out_file_prefix + '_feature_boxplot.png', dpi=300)
-        plt.close()
+    '''plot density and boxplot of features'''
+    
+    fig = plt.figure(figsize =(10, 7))
+    #ax = fig.add_axes([0,0,1,1])
+    fl = np_array.flatten()
+    fl_size = fl.shape[0]
+    fl_nz = fl[fl > 0]
+    frac_zero = str(fl_nz.shape[0] / fl.shape[0])
+    l = min(4,len(frac_zero))
+    frac_zero = frac_zero[0:l]
+    title = 'density of feature values'
+
+    sns.set_style('whitegrid')
+    sns_plot = sns.kdeplot(fl, bw=0.5, cut=0)
+    sns_plot.set(title=title)
+
+    fig = sns_plot.get_figure()
+    fig.savefig(out_file_prefix + '_feature_density.png')
+    plt.close()
+
+    plt.boxplot(fl_nz)
+    plt.title('boxplot of non-zero feature values; proportion of zeros: ' + frac_zero)
+    plt.savefig(out_file_prefix + '_feature_boxplot.png', dpi=300)
+    plt.close()
 
 def plot_diagnostic_heatmaps(submatrices,clusters,out_file_prefix,vmin=None,vmax=None,colormap='RdYlBu_r',dpi=300,transform='log1p'):
+    '''plot submatrices heatmap by cluster'''
 
     M_half = int((submatrices[0].shape[0] - 1) // 2)
     #num_chromosomes = len(chrom_diagonals)
@@ -728,7 +737,7 @@ def plot_diagnostic_heatmaps(submatrices,clusters,out_file_prefix,vmin=None,vmax
 def get_random_regions(amount,region_start,region_end,chromosome,region_size=1):
     '''create a bed file with random regions'''
     
-    samples = np.array(random.samples(range(region_start,region_end),amount))
+    samples = np.array(random.sample(range(region_start,region_end),amount))
     cols = {'Chrom': pd.Series([], dtype='str'),
             'Start': pd.Series([], dtype='int'),
             'End': pd.Series([], dtype='int'),
@@ -742,7 +751,8 @@ def get_random_regions(amount,region_start,region_end,chromosome,region_size=1):
     random_bed_file['End'] = samples + region_size
     random_bed_file['UnknownCol1'] = np.zeros(samples.shape)
     random_bed_file['UnknownCol2'] = np.zeros(samples.shape)
-    random_bed_file['Strand'] = np.zeros(samples.shape)
+    random_bed_file['Strand'] = '.'
+    random_bed_file['RegionIndex'] = np.arange(0,random_bed_file.shape[0])
     
     return random_bed_file
     
@@ -750,7 +760,7 @@ def mix_with_random_regions(regions,region_start=None,region_end=None):
     '''introduce random regions to an input bed file'''
     
     n_rows = int(regions.shape[0]*1.1)
-    region_size = int(regions.median(regions['End'] - regions['Start']))
+    region_size = int(np.median(regions['End'].to_numpy() - regions['Start'].to_numpy()))
     chromosome = regions['Chrom'][0]
     regions.sort_values(by=["Chrom", "Start"],inplace=True)
     
@@ -758,40 +768,76 @@ def mix_with_random_regions(regions,region_start=None,region_end=None):
         region_start = regions['Start'][0]
     
     if(region_end is None):
-        region_end = regions['Start'][-1]
+        region_end = regions['Start'].to_numpy()[-1]
+        
+    #print(region_start)
+    #print(region_end)
+    #print(n_rows)
+    #print(chromosome)
     
     random_bed_file = get_random_regions(n_rows,region_start,region_end,chromosome,region_size=region_size)
     
-    random_bed_file['is_random'] = True
-    regions['is_random'] = False
-    
-    regions.append(random_bed_file)
+    #print(random_bed_file)
+    random_bed_file['TestLabel'] = 1
+    regions['TestLabel'] = 0
+    regions = regions.append(random_bed_file)
     regions.sort_values(by=["Chrom", "Start"],inplace=True)
     regions.drop_duplicates(subset=["Chrom", "Start"],inplace=True)
     regions.set_index(np.arange(0,regions.shape[0]),inplace=True)
-    
-    return regions[get_regions_bed_col_names()],regions['is_random']
+    regions['RegionIndex'] = np.arange(0,regions.shape[0])
+    cols = get_regions_bed_col_names()
+    cols.append('RegionIndex')
+    return regions[cols],regions['TestLabel']
 
-def dev_print_infos(is_random,pairs,indices_list,clusters):
+def dev_print_infos(pairs,clusters,dev_feature_type,dev_n_pairs,dev_n_regions,dev_evaluation):
+    '''print clustering output'''
     
-    indices_list = indices_list.copy(deep=True)
-    pairs = pairs.copy(deep=True)
-    
-    indices_list['Cluster'] = clusters
-    indices_list['isRandom'] = is_random
-    
-    pairs = pd.merge(pairs, indices_list, how='inner', left_on=['Chrom','Start','End'], right_on=['Chrom','Start','End'])
-    pairs = pd.merge(pairs, indices_list, how='inner', left_on=['pairChrom','pairStart','pairEnd'], right_on=['Chrom','Start','End'],suffixes=(None,'_pair'))
-    
-    pairs['hasOneRandom'] = pairs['isRandom'] | pairs['isRandom_pair']
-    
-    conditions = [pairs['Cluster'] == pairs['Cluster_pair']]
-    choices = [True,False]
-    pairs['hasSameCluster'] = np.select(conditions,choices,default=False)
-    
-    for index,row in pairs.iterrows():
-        print('r: ' + str(row['isRandom']) + ' ' + str(row['isRandom_pair']) + ' c: ' + str(row['Cluster']) + ' ' + str(row['Cluster_pair']))
+    if(dev_evaluation is None):
+        print(clusters)
+        return
         
+    #indices_list = indices_list.copy(deep=True)
+    print(clusters)
+    print(pairs['Cluster'])
+    
+    #print(np.maximum(pairs['TestLabel'].to_numpy(),pairs['TestLabel_pair'].to_numpy()))
+    if(dev_evaluation == 'test_against_random'):
+        pairs['OutputTestLabel'] = np.maximum(pairs['TestLabel'].to_numpy(),pairs['pairTestLabel'].to_numpy())
+    else:
+        pairs['OutputTestLabel'] = pairs['TestLabel']
+    
+    assert pairs.shape[0] == dev_n_pairs
+    
+    if(dev_feature_type == 'per_region_flattened' or dev_feature_type == 'per_region_aggregated'):    
+        #conditions = [pairs['Cluster'] == pairs['Cluster_pair']]
+        #choices = [True,False]
+        #pairs['hasSameCluster'] = np.select(conditions,choices,default=False)
+        score = dev_evaluation_function(test_labels,clusters)
+    
+    else:
+        score = dev_evaluation_function(pairs['Cluster'].to_numpy(),pairs['TestLabel'].to_numpy())
+        
+    print(score)
+    print(pairs[['RegionIndex','Cluster','TestLabel']])
+    pairs[['RegionIndex','Cluster','TestLabel']].to_csv('evaluation_labels', sep=';', index=False)
+
+def dev_evaluation_function(test_labels,cluster_labels):
+    '''compute evaluation score for clustering'''
+    
+    score = metrics.rand_score(test_labels,cluster_labels)
+    return score
+
+def dev_read_test_labels(test_label_file):
+    '''get test labels for evaluation'''
+    
+    test_label_df = pd.read_csv(test_label_file, sep="\t", header=None)
+    test_label_df.columns = ['TestLabel']
+    
+    if(test_label_df.size < 1):
+        raise ValueError('empty domain file passed')
+        
+    return test_label_df['TestLabel']
+
 #define parser and description
 
 def parse_arguments(args=None):
@@ -982,13 +1028,22 @@ $ hicClusterContacts
     
     parserOpt.add_argument('--devOutlierCroppingMax',
                            default=None,
-                           type=int,Note: If you use the same seed value twice you will get the same random number twice. See example below
+                           type=int,
                            help='max value for outlier cropping')
     
-    parserOpt.add_argument('--devMixInRandomRegions',
-                           default=False,
-                           type=bool,
-                           help='introduce random region to the input')
+    parserOpt.add_argument('--devEvaluation',
+                           default=None,
+                           type=str,
+                           choices=[
+                               'test_against_random',
+                               'provide_test_labels',
+                               None],
+                           help='provide evaluation for the clustering')
+          
+    parserOpt.add_argument('--devTestLabels',
+                           default=None,
+                           type=str,
+                           help='path to test labels')    
     
     parserOpt.add_argument('--randomSeed',
                            default=None,
@@ -1051,68 +1106,105 @@ def main(args=None):
     #check for faulty parameters
     
     #ingest matrix file(s)
-    print('reading matrix file')
+    log.info('reading matrix file')
     pChromosome = None
     matrix = read_matrix_file(matrix_file, pChromosome)
     
-    print('reading bed file')
+    log.info('reading bed file')
     #ingest bed file
     regions = read_regions_bed(bed_file)
     
-    if(args.devMixInRandomRegions):
-        bed_file,is_random = mix_with_random_regions(bed_file,region_start=None,region_end=None)
-    else:
-        is_random = None
+    dev_n_regions = regions.shape[0]
+    log.info('regions in bed file: ' + str(dev_n_regions))
     
-    print('normalizing matrix file')
+    if(args.devEvaluation == 'test_against_random'):
+        regions,test_labels = mix_with_random_regions(regions,region_start=None,region_end=None)
+        
+        assert dev_n_regions*2 <= regions.shape[0] and dev_n_regions*2.1 >= regions.shape[0]
+        dev_n_regions = regions.shape[0]        
+        log.info('random and non-random regions: ' + str(dev_n_regions))
+    
+    elif(args.devEvaluation == 'provide_test_labels'):
+        assert not args.devTestLabels is None
+        test_labels = dev_read_test_labels(args.devTestLabels)
+          
+    else:
+        test_labels = np.zeros(regions.shape[0])
+    
+    regions['TestLabel'] = test_labels
+    
+    log.info('normalizing matrix file')
     #normalize matrix file(s)
     #matrix = obs_exp_normalization(matrix, pThreads=threads)
     
-    print('calculating valid interaction pairs')
+    log.info('calculating valid interaction pairs')
     #get pairs
     pairs = get_pairs(regions,min_distance,max_distance,resolution)
     
-    print('cutting out submatrices for interaction pairs')
+    dev_n_pairs = pairs.shape[0]        
+    log.info('number of pairs: ' + str(dev_n_pairs))
+    
+    log.info('cutting out submatrices for interaction pairs')
     #cut out submatrices
-    pairs, submatrices = get_submatrices(matrix,pairs,submatrix_size)
+    regions, pairs, submatrices = get_submatrices(matrix,regions,pairs,submatrix_size)
+
+    assert dev_n_pairs >= pairs.shape[0]
+    dev_n_pairs = pairs.shape[0]
+    assert dev_n_pairs == len(submatrices)
     
     submatrices = outlier_cropping_and_transformation(submatrices,min_value=outlier_min,max_value=outlier_max)
     
-    print('aggregating features for clustering')
+    assert len(submatrices) == dev_n_pairs
+    
+    log.info('aggregating features for clustering')
     #aggregate features from submatrices
     features = get_features(submatrices,center_size=center_size,corner_position=corner_position,corner_size=corner_size)
     plot_density(features,out_file_prefix)
     
+    assert len(features) == dev_n_pairs
+    
     if(dev_feature_type == 'per_region_flattened' or dev_feature_type == 'per_region_aggregated'):
-        pairs, indices_list, features = get_feature_matrix(pairs,features,dev_feature_type = dev_feature_type)
-            
-        print('clustering')
+        features = get_feature_matrix(pairs,features,regions,dev_feature_type = dev_feature_type)
+        
+        assert pairs.shape[0] == dev_n_pairs
+        assert features.shape[0] == dev_n_regions
+
+        log.info('clustering')
         #cluster submatrices
         features = perform_clustering_preprocessing(features,preprocessing_type=preprocessing_type)
         clusters = perform_clustering(features,k,cluster_algorithm=cluster_algorithm)
-        clusters_per_interactions = region_to_pair_cluster_labels(pairs,indices_list,clusters)
+        pairs['Cluster'] = region_to_pair_labels(pairs,clusters,'Cluster')
         
-        print('writing results to file')
-        output_results(out_file_contact_pairs,pairs,indices_list,clusters,random_regions=is_random)
+        assert features.shape[0] == dev_n_regions
+        assert clusters.shape[0] == dev_n_regions
+        assert clusters_per_interactions.shape[0] == dev_n_pairs
+        
+        log.info('writing results to file')
+        output_results(out_file_contact_pairs,pairs)
         
     else:
-        print('clustering')
+        log.info('clustering')
         #cluster submatrices
         features = perform_clustering_preprocessing(features,preprocessing_type=preprocessing_type)
         clusters = perform_clustering(features,k,cluster_algorithm=cluster_algorithm)
-        clusters_per_interactions = clusters
+        pairs['Cluster'] = clusters
         
-        print('writing results to file')
-        output_results_alt(out_file_contact_pairs,pairs,clusters,random_regions=is_random)
+        assert len(clusters) == dev_n_pairs
+        assert features.shape[0] == dev_n_pairs
+      
+        log.info('writing results to file')
+        output_results(out_file_contact_pairs,pairs)
     
-    print('plotting results in scatter plot')
+    log.info('plotting results in scatter plot')
     plot_results(features,clusters,out_file_fig,scatter_plot_type = scatter_plot_type,preprocessing_type=preprocessing_type)
     
-    print('plot submatrices')
-    plot_submatrices(submatrices,clusters_per_interactions,args.outFilePrefix + 'mean_submatrices.png',vmin=vmin,vmax=vmax,colormap=colormap,plot_aggr_mode=plot_aggr_mode)
-    plot_diagnostic_heatmaps(submatrices,clusters_per_interactions,args.outFilePrefix)
+    log.info('plot submatrices')
+    plot_submatrices(submatrices,pairs['Cluster'].to_numpy(),args.outFilePrefix + 'mean_submatrices.png',vmin=vmin,vmax=vmax,colormap=colormap,plot_aggr_mode=plot_aggr_mode)
+    plot_diagnostic_heatmaps(submatrices,pairs['Cluster'].to_numpy(),args.outFilePrefix)
     
     #corr_matrix = compute_correlation(submatrices,clusters_per_interactions,out_file_name=args.outFilePrefix + 'correlation_scatter.png')
     #plot_correlation(corr_matrix,clusters_per_interactions,args.outFilePrefix + 'correlation_heatmap.png', vmax=None,vmin=None, image_format=None)
     
-    print('Done')
+    dev_print_infos(pairs,clusters,dev_feature_type,dev_n_pairs,dev_n_regions,args.devEvaluation)
+    
+    log.info('Done')
