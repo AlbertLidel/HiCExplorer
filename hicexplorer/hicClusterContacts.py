@@ -113,6 +113,27 @@ def read_regions_bed(bed_file):
 
     return bed_df
 
+def get_region_position_type(regions,args_region_position_type=None):
+    '''select from input information, how to determine the exact position on matrix of the given regions'''
+    
+    assert args_region_position_type in [None,'Start','End','Center']
+    
+    if(not args_region_position_type is None):
+        return region_position_type
+    
+    strand_type = regions['Strand'].mode()[0]
+    
+    if(strand_type == '-' or strand_type == '-1'):
+        region_position_type = 'End'
+        
+#    elif(strand_type == '+' or strand_type == '1'):
+#        region_position_type = 'Start'
+        
+    else:
+        region_position_type = 'Start'
+    
+    return region_position_type
+
 def get_pairs(regions,min_distance=1000000,max_distance=20000000,resolution=1):
     """get valid interaction pairs within given distance constraints"""
     
@@ -159,7 +180,7 @@ def get_pairs(regions,min_distance=1000000,max_distance=20000000,resolution=1):
     
     return pairs
 
-def get_submatrices(matrix,regions,pairs,submatrix_size=9):
+def get_submatrices(matrix,regions,pairs,submatrix_size=9,position_type='Start'):
     """collect submatrices for every pair of regions"""
     
     #get submatrices for these pairs
@@ -170,6 +191,7 @@ def get_submatrices(matrix,regions,pairs,submatrix_size=9):
     chr_pos = dict(zip(chromosomes,map(matrix.getChrBinRange,chromosomes)))
     submatrix_radius = math.floor(submatrix_size / 2)
     remove_rows = []
+    assert position_type in ['Start','End','Center']
     
     for index,row in pairs.iterrows():
         
@@ -179,11 +201,26 @@ def get_submatrices(matrix,regions,pairs,submatrix_size=9):
         
         try:
             pos_chr_list = pos_dict[row['Chrom']]
-            i = find_le(pos_chr_list, row['Start']) + chr_pos[row['Chrom']][0]
+            pair_pos_chr_list = pos_dict[row['pairChrom']]
             
-            pos_chr_list = pos_dict[row['pairChrom']]
-            j = find_le(pos_chr_list, row['pairStart']) + chr_pos[row['pairChrom']][0]
+            i_start = find_le(pos_chr_list, row['Start']) + chr_pos[row['Chrom']][0]
+            j_start = find_le(pair_pos_chr_list, row['pairStart']) + chr_pos[row['pairChrom']][0]                
+
+            i_end = find_le(pos_chr_list, row['End']) + chr_pos[row['Chrom']][0]
+            j_end = find_le(pair_pos_chr_list, row['pairEnd']) + chr_pos[row['pairChrom']][0]
             
+            if(position_type == 'Start'):
+                i = i_start
+                j = j_start
+                
+            elif(position_type == 'End'):
+                i = i_end
+                j = j_end
+            
+            else:
+                i = int((i_start + i_end) / 2)
+                j = int((j_start + j_end) / 2)
+                
             log.debug('position: ' + str(i) + ' ' + str(j) + ' in matrix: ' + str(matrix.matrix.shape[0]))
             
             row['MatrixIndex'] = i
@@ -793,12 +830,10 @@ def dev_print_infos(pairs,clusters,dev_feature_type,dev_n_pairs,dev_n_regions,de
     '''print clustering output'''
     
     if(dev_evaluation is None):
-        print(clusters)
+        print(pairs[['RegionIndex','Cluster']])
         return
         
     #indices_list = indices_list.copy(deep=True)
-    print(clusters)
-    print(pairs['Cluster'])
     
     #print(np.maximum(pairs['TestLabel'].to_numpy(),pairs['TestLabel_pair'].to_numpy()))
     if(dev_evaluation == 'test_against_random'):
@@ -839,6 +874,299 @@ def dev_read_test_labels(test_label_file):
     return test_label_df['TestLabel']
 
 #define parser and description
+
+def compute_correlation(submatrices,clusters_per_interaction,correlation_type='pearson',out_file_name=None):
+    '''compute correlation coefficient between the given subrmatrices'''
+    #code taken and adapted from hicCorrelate
+    
+    def get_vectors(mat1, mat2):
+        """
+        Uses sparse matrix tricks to convert
+        into a vector the matrix values such
+        that zero values that appear in only
+        one of the matrices is kept. But
+        zeros in two matrices are removed
+
+        Requires two sparse matrices as input
+        """
+        assert mat1.shape == mat2.shape, "Matrices have different shapes. "\
+            "Computation of correlation is not possible."
+
+        # create a new matrix that is the sum of the two
+        # matrices to compare. The goal is to have
+        # a matrix that contains all the positions
+        # that are non-zero in both matrices
+        _mat = mat1 + mat2
+
+        # add one to each element in the new matrix
+        _mat.data += 1
+
+        # get a vector of the values in mat1 from
+        # _mat
+        values1 = (_mat - mat1) - 1
+
+        # get a vector of the values in mat2 from
+        # _mat
+        values2 = (_mat - mat2) - 1
+
+        return values1, values2
+        
+    assert len(submatrices) == len(clusters_per_interaction)
+    matrices = submatrices
+    labels = clusters_per_interaction
+    num_files = len(matrices)
+    
+    #map(lambda x: os.path.basename(x), args.matrices)
+    # initialize results matrix
+    results = np.zeros((num_files, num_files), dtype='float')
+
+    rows, cols = np.triu_indices(num_files)
+    correlation_opts = {'spearman': spearmanr,
+                        'pearson': pearsonr}
+    hic_mat_list = []
+    max_value = None
+    min_value = None
+    all_mat = None
+    all_nan = []
+
+    for i, _mat in enumerate(matrices):
+
+        np.diagflat(_mat,0)
+        #log.debug("restore masked bins {}\n".format(mat))
+        #bin_size = _mat.getBinSize()
+        #all_nan = np.unique(np.concatenate([all_nan, _mat]))
+
+        #_mat = triu(_mat, k=0, format='csr')
+        _mat = np.triu(_mat)
+        
+#        if args.range:
+#            min_dist, max_dist = args.range.split(":")
+#            min_dist = int(min_dist)
+#            max_dist = int(max_dist)
+#            if max_dist < bin_size:
+#                log.error("Please specify a max range that is larger than bin size ({})".format(bin_size))
+#                exit()
+#            max_depth_in_bins = int(max_dist / bin_size)
+#            max_dist = int(max_dist) // bin_size
+#            min_dist = int(min_dist) // bin_size
+            # work only with the upper matrix
+            # and remove all pixels that are beyond
+            # max_depth_in_bis
+            # (this is done by subtracting a second sparse matrix
+            # that contains only the upper matrix that wants to be removed.
+#            _mat = triu(_mat, k=0, format='csr') - triu(_mat, k=max_depth_in_bins, format='csr')
+
+#            _mat.eliminate_zeros()
+
+#            _mat_coo = _mat.tocoo()
+#            dist = _mat_coo.col - _mat_coo.row
+#            keep = np.flatnonzero((dist <= max_dist) & (dist >= min_dist))
+#            _mat_coo.data = _mat_coo.data[keep]
+#            _mat_coo.row = _mat_coo.row[keep]
+#            _mat_coo.col = _mat_coo.col[keep]
+#            _mat = _mat_coo.tocsr()
+#        else:
+            
+#        _mat = triu(_mat, k=0, format='csr')
+
+#        if args.log1p:
+#            _mat.data = np.log1p(_mat.data)
+        if all_mat is None:
+            all_mat = _mat
+        else:
+            all_mat = all_mat + _mat
+
+        if max_value is None or max_value < np.max(_mat):
+            max_value = np.max(_mat)
+        if min_value is None or min_value > np.min(_mat):
+            min_value = np.min(_mat)
+
+        hic_mat_list.append(_mat)
+
+    # remove nan bins
+    #rows_keep = cols_keep = np.delete(list(range(all_mat.shape[1])), all_nan.astype('int'))
+    #all_mat = all_mat[rows_keep, :][:, cols_keep]
+
+    # make large matrix to correlate by
+    # using sparse matrix tricks
+
+    big_mat = None
+    
+    for mat in hic_mat_list:
+        #mat = mat[rows_keep, :][:, cols_keep]
+        sample_vector = mat.flatten()
+        
+        if big_mat is None:
+            big_mat = sample_vector
+        else:
+            big_mat = np.vstack([big_mat, sample_vector])
+
+    # take the transpose such that columns represent each of the samples
+    big_mat = np.ma.masked_invalid(big_mat).T
+
+    grids = gridspec.GridSpec(num_files, num_files)
+    grids.update(wspace=0, hspace=0)
+    fig = plt.figure(figsize=(2 * num_files, 2 * num_files))
+    plt.rcParams['font.size'] = 8.0
+
+    min_value = int(np.min(big_mat))
+    max_value = int(np.max(big_mat))
+    
+    if (min_value % 2 == 0 and max_value % 2 == 0) or \
+            (min_value % 1 == 0 and max_value % 2 == 1):
+        # make one value odd and the other even
+        max_value += 1
+
+#    if args.log1p:
+#        major_locator = FixedLocator(list(range(min_value, max_value, 2)))
+#        minor_locator = FixedLocator(list(range(min_value, max_value, 1)))
+
+    for index in range(len(rows)):
+        row = rows[index]
+        col = cols[index]
+        if row == col:
+            results[row, col] = 1
+
+            # add titles as
+            # empty plot in the diagonal
+            ax = fig.add_subplot(grids[row, col])
+            ax.text(0.6, 0.6, 'scatter plot',
+                    verticalalignment='center',
+                    horizontalalignment='center',
+                    fontsize=10, fontweight='bold',
+                    transform=ax.transAxes)
+            ax.set_axis_off()
+            continue
+
+        #log.debug("comparing {} and {}\n".format(args.matrices[row],args.matrices[col]))
+
+        # remove cases in which both are zero or one is zero and
+        # the other is one
+        _mat = big_mat[:, [row, col]]
+        _mat = _mat[_mat.sum(axis=1) > 1, :]
+        vector1 = _mat[:, 0]
+        vector2 = _mat[:, 1]
+
+        results[row, col] = correlation_opts[correlation_type](vector1, vector2)[0]
+
+        # scatter plots
+        ax = fig.add_subplot(grids[row, col])
+        
+        #if args.log1p:
+        #    ax.xaxis.set_major_locator(major_locator)
+        #    ax.xaxis.set_minor_locator(minor_locator)
+        #    ax.yaxis.set_major_locator(major_locator)
+        #    ax.yaxis.set_minor_locator(minor_locator)
+
+        ax.text(0.2, 0.8, "{}={:.2f}".format(correlation_type,
+                                             results[row, col]),
+                horizontalalignment='left',
+                transform=ax.transAxes)
+        ax.get_yaxis().set_tick_params(
+            which='both',
+            left='off',
+            right='off',
+            direction='out')
+
+        ax.get_xaxis().set_tick_params(
+            which='both',
+            top='off',
+            bottom='off',
+            direction='out')
+
+        if col != num_files - 1:
+            ax.set_yticklabels([])
+        else:
+            ax.yaxis.tick_right()
+            ax.get_yaxis().set_tick_params(
+                which='both',
+                left='off',
+                right='on',
+                direction='out')
+        if col - row == 1:
+            ax.xaxis.tick_bottom()
+            ax.get_xaxis().set_tick_params(
+                which='both',
+                top='off',
+                bottom='on',
+                direction='out')
+        else:
+            ax.set_xticklabels([])
+
+        ax.hist2d(vector1, vector2, bins=150, cmin=0.1)
+        
+    fig.tight_layout()
+    
+    if(not out_file_name is None):
+        log.debug("saving {}".format(out_file_name))
+        fig.savefig(out_file_name, bbox_inches='tight')
+        
+    plt.close()
+    return results + np.triu(results, 1).T
+    
+def plot_correlation(corr_matrix, labels, out_file_name, vmax=None,
+                     vmin=None, colormap='Reds', image_format='png'):
+    '''plot the given correlation matrix'''
+    
+    #code taken and adapted from hicCorrelate
+    import scipy.cluster.hierarchy as sch
+    num_rows = corr_matrix.shape[0]
+
+    # set the minimum and maximum values
+    if vmax is None:
+        vmax = 1
+    if vmin is None:
+        vmin = 0 if corr_matrix.min() >= 0 else -1
+
+    # Compute and plot dendrogram.
+    fig = plt.figure(figsize=(10.5, 9.5))
+    axdendro = fig.add_axes([0.02, 0.1, 0.1, 0.7])
+    axdendro.set_axis_off()
+    y_var = sch.linkage(corr_matrix, method='complete')
+    z_var = sch.dendrogram(y_var, orientation='left',
+                           link_color_func=lambda k: 'black')
+    axdendro.set_xticks([])
+    axdendro.set_yticks([])
+    cmap = plt.get_cmap(colormap)
+
+    # this line simply makes a new cmap, based on the original
+    # colormap that goes from 0.0 to 0.9
+    # This is done to avoid colors that
+    # are too dark at the end of the range that do not offer
+    # a good contrast between the correlation numbers that are
+    # plotted on black.
+    cmap = cmap.from_list(colormap + "clipped", cmap([0.0, 0.8]))
+    # Plot distance matrix.
+    axmatrix = fig.add_axes([0.13, 0.1, 0.6, 0.7])
+    index = z_var['leaves']
+    corr_matrix = corr_matrix[index, :]
+    corr_matrix = corr_matrix[:, index]
+    img_mat = axmatrix.matshow(corr_matrix, aspect='equal', origin='lower',
+                               cmap=cmap, extent=(0, num_rows, 0, num_rows),
+                               vmax=vmax, vmin=vmin)
+    axmatrix.yaxis.tick_right()
+    axmatrix.set_yticks(np.arange(corr_matrix.shape[0]) + 0.5)
+    axmatrix.set_yticklabels(np.array(labels).astype('str')[index],
+                             fontsize=14)
+
+    axmatrix.set_xticks(np.arange(corr_matrix.shape[0]) + 0.5)
+    axmatrix.set_xticklabels(np.array(labels).astype('str')[index],
+                             fontsize=14,
+                             rotation=45,
+                             ha='left')
+
+#    axmatrix.set_xticks([])
+    # Plot colorbar.
+    axcolor = fig.add_axes([0.13, 0.065, 0.6, 0.02])
+    plt.colorbar(img_mat, cax=axcolor, orientation='horizontal')
+    for row in range(num_rows):
+        for col in range(num_rows):
+            axmatrix.text(row + 0.5, col + 0.5,
+                          "{:.2f}".format(corr_matrix[row, col]),
+                          ha='center', va='center')
+
+    fig.savefig(plot_filename, format=image_format)
+    plt.close()
 
 def parse_arguments(args=None):
     """
@@ -979,6 +1307,16 @@ $ hicClusterContacts
                            default='mean',
                            help='whether plotted submatrices use mean or median aggregation')
     
+    parserOpt.add_argument('--regionPositionType',
+                           default=None,
+                           type=str,
+                           choices=[
+                               'Start',
+                               'End',
+                               'Center',
+                               None],
+                           help='determine positioning type for regions')
+    
     parserOpt.add_argument('--devPreprocessingType',
                            choices=[
                                'pca',
@@ -1056,7 +1394,16 @@ $ hicClusterContacts
                             None,
                             'log1p'
                            ],
-                           help='Chooses whether to transform the submatrices before clustering')    
+                           help='Chooses whether to transform the submatrices before clustering')
+    
+    parserOpt.add_argument('--devCorrelationPlotType',
+                           default=None,
+                           type=str,
+                           choices=[
+                               'pearson',
+                               'spearman',
+                               None],
+                           help='output correlation plot')
 
     parserOpt.add_argument("--help", "-h", action="help",
                            help="show this help message and exit")
@@ -1085,10 +1432,6 @@ def main(args=None):
     outlier_min = args.devOutlierCroppingMin
     outlier_max = args.devOutlierCroppingMax    
     
-    out_file_contact_pairs = args.outFilePrefix + 'contact_pairs.bed'
-    out_file_fig = args.outFilePrefix + 'scatter.png'
-    out_file_prefix = args.outFilePrefix
-    
     resolution = 1
     corner_position = 'upper_left'
     corner_size = 2
@@ -1112,99 +1455,121 @@ def main(args=None):
     
     log.info('reading bed file')
     #ingest bed file
-    regions = read_regions_bed(bed_file)
+    all_regions = read_regions_bed(bed_file)
+    chromosomes = pd.unique(all_regions['Chrom'])
+    log.info('regions contain chromosomes: ' + str(chromosomes))
+    assert len(chromosomes) > 0
+    region_position_type = get_region_position_type(all_regions,args_region_position_type=args.regionPositionType)
+    log.info('using positioning type: ' + region_position_type)
     
-    dev_n_regions = regions.shape[0]
+    dev_n_regions = all_regions.shape[0]
     log.info('regions in bed file: ' + str(dev_n_regions))
     
-    if(args.devEvaluation == 'test_against_random'):
-        regions,test_labels = mix_with_random_regions(regions,region_start=None,region_end=None)
-        
-        assert dev_n_regions*2 <= regions.shape[0] and dev_n_regions*2.1 >= regions.shape[0]
-        dev_n_regions = regions.shape[0]        
-        log.info('random and non-random regions: ' + str(dev_n_regions))
-    
-    elif(args.devEvaluation == 'provide_test_labels'):
+    if(args.devEvaluation == 'provide_test_labels'):
         assert not args.devTestLabels is None
         test_labels = dev_read_test_labels(args.devTestLabels)
           
     else:
-        test_labels = np.zeros(regions.shape[0])
+        test_labels = np.zeros(all_regions.shape[0])
     
-    regions['TestLabel'] = test_labels
+    all_regions['TestLabel'] = test_labels
     
     log.info('normalizing matrix file')
     #normalize matrix file(s)
     #matrix = obs_exp_normalization(matrix, pThreads=threads)
     
-    log.info('calculating valid interaction pairs')
-    #get pairs
-    pairs = get_pairs(regions,min_distance,max_distance,resolution)
-    
-    dev_n_pairs = pairs.shape[0]        
-    log.info('number of pairs: ' + str(dev_n_pairs))
-    
-    log.info('cutting out submatrices for interaction pairs')
-    #cut out submatrices
-    regions, pairs, submatrices = get_submatrices(matrix,regions,pairs,submatrix_size)
+    for c in chromosomes:
+        log.info('running for chromosome ' + str(c))
+        regions = all_regions[all_regions['Chrom'] == c]
+        log.info('numbers of regions on chromosome: ' + str(regions.shape[0]))
+        
+        if(args.devEvaluation == 'test_against_random'):
+            all_regions,test_labels = mix_with_random_regions(all_regions,region_start=None,region_end=None)
 
-    assert dev_n_pairs >= pairs.shape[0]
-    dev_n_pairs = pairs.shape[0]
-    assert dev_n_pairs == len(submatrices)
-    
-    submatrices = outlier_cropping_and_transformation(submatrices,min_value=outlier_min,max_value=outlier_max)
-    
-    assert len(submatrices) == dev_n_pairs
-    
-    log.info('aggregating features for clustering')
-    #aggregate features from submatrices
-    features = get_features(submatrices,center_size=center_size,corner_position=corner_position,corner_size=corner_size)
-    plot_density(features,out_file_prefix)
-    
-    assert len(features) == dev_n_pairs
-    
-    if(dev_feature_type == 'per_region_flattened' or dev_feature_type == 'per_region_aggregated'):
-        features = get_feature_matrix(pairs,features,regions,dev_feature_type = dev_feature_type)
+            assert dev_n_regions*2 <= all_regions.shape[0] and dev_n_regions*2.1 >= all_regions.shape[0]
+            dev_n_regions = regions.shape[0]
+            log.info('random and non-random regions: ' + str(dev_n_regions))
+            
+            regions['TestLabel'] = test_labels
+            
+        dev_n_regions = regions.shape[0]
         
-        assert pairs.shape[0] == dev_n_pairs
-        assert features.shape[0] == dev_n_regions
+        out_file_contact_pairs = args.outFilePrefix + '_' + str(c) + '_contact_pairs.bed'
+        out_file_fig = args.outFilePrefix + '_' + str(c) + '_scatter.png'
+        out_file_prefix = args.outFilePrefix + '_' + str(c)
+        
+    
+        log.info('calculating valid interaction pairs')
+        #get pairs
+        pairs = get_pairs(regions,min_distance,max_distance,resolution)
 
-        log.info('clustering')
-        #cluster submatrices
-        features = perform_clustering_preprocessing(features,preprocessing_type=preprocessing_type)
-        clusters = perform_clustering(features,k,cluster_algorithm=cluster_algorithm)
-        pairs['Cluster'] = region_to_pair_labels(pairs,clusters,'Cluster')
-        
-        assert features.shape[0] == dev_n_regions
-        assert clusters.shape[0] == dev_n_regions
-        assert clusters_per_interactions.shape[0] == dev_n_pairs
-        
-        log.info('writing results to file')
-        output_results(out_file_contact_pairs,pairs)
-        
-    else:
-        log.info('clustering')
-        #cluster submatrices
-        features = perform_clustering_preprocessing(features,preprocessing_type=preprocessing_type)
-        clusters = perform_clustering(features,k,cluster_algorithm=cluster_algorithm)
-        pairs['Cluster'] = clusters
-        
-        assert len(clusters) == dev_n_pairs
-        assert features.shape[0] == dev_n_pairs
-      
-        log.info('writing results to file')
-        output_results(out_file_contact_pairs,pairs)
-    
-    log.info('plotting results in scatter plot')
-    plot_results(features,clusters,out_file_fig,scatter_plot_type = scatter_plot_type,preprocessing_type=preprocessing_type)
-    
-    log.info('plot submatrices')
-    plot_submatrices(submatrices,pairs['Cluster'].to_numpy(),args.outFilePrefix + 'mean_submatrices.png',vmin=vmin,vmax=vmax,colormap=colormap,plot_aggr_mode=plot_aggr_mode)
-    plot_diagnostic_heatmaps(submatrices,pairs['Cluster'].to_numpy(),args.outFilePrefix)
-    
-    #corr_matrix = compute_correlation(submatrices,clusters_per_interactions,out_file_name=args.outFilePrefix + 'correlation_scatter.png')
-    #plot_correlation(corr_matrix,clusters_per_interactions,args.outFilePrefix + 'correlation_heatmap.png', vmax=None,vmin=None, image_format=None)
-    
-    dev_print_infos(pairs,clusters,dev_feature_type,dev_n_pairs,dev_n_regions,args.devEvaluation)
+        dev_n_pairs = pairs.shape[0]
+        log.info('number of pairs on chromosome: ' + str(dev_n_pairs))
+
+        log.info('cutting out submatrices for interaction pairs')
+        #cut out submatrices
+        regions, pairs, submatrices = get_submatrices(matrix,regions,pairs,submatrix_size,position_type=region_position_type)
+
+        assert dev_n_pairs >= pairs.shape[0]
+        dev_n_pairs = pairs.shape[0]
+        assert dev_n_pairs == len(submatrices)
+
+        submatrices = outlier_cropping_and_transformation(submatrices,min_value=outlier_min,max_value=outlier_max)
+
+        assert len(submatrices) == dev_n_pairs
+
+        log.info('aggregating features for clustering')
+        #aggregate features from submatrices
+        features = get_features(submatrices,center_size=center_size,corner_position=corner_position,corner_size=corner_size)
+        plot_density(features,out_file_prefix)
+
+        assert len(features) == dev_n_pairs
+
+        if(dev_feature_type == 'per_region_flattened' or dev_feature_type == 'per_region_aggregated'):
+            features = get_feature_matrix(pairs,features,regions,dev_feature_type = dev_feature_type)
+
+            assert pairs.shape[0] == dev_n_pairs
+            assert features.shape[0] == dev_n_regions
+
+            log.info('clustering')
+            #cluster submatrices
+            features = perform_clustering_preprocessing(features,preprocessing_type=preprocessing_type)
+            clusters = perform_clustering(features,k,cluster_algorithm=cluster_algorithm)
+            pairs['Cluster'] = region_to_pair_labels(pairs,clusters,'Cluster')
+
+            assert features.shape[0] == dev_n_regions
+            assert clusters.shape[0] == dev_n_regions
+            assert clusters_per_interactions.shape[0] == dev_n_pairs
+
+            log.info('writing results to file')
+            output_results(out_file_contact_pairs,pairs)
+
+        else:
+            log.info('clustering')
+            #cluster submatrices
+            features = perform_clustering_preprocessing(features,preprocessing_type=preprocessing_type)
+            clusters = perform_clustering(features,k,cluster_algorithm=cluster_algorithm)
+            pairs['Cluster'] = clusters
+
+            assert len(clusters) == dev_n_pairs
+            assert features.shape[0] == dev_n_pairs
+
+            log.info('writing results to file')
+            output_results(out_file_contact_pairs,pairs)
+
+        log.info('plotting results in scatter plot')
+        plot_results(features,clusters,out_file_fig,scatter_plot_type = scatter_plot_type,preprocessing_type=preprocessing_type)
+
+        log.info('plot submatrices')
+        plot_submatrices(submatrices,pairs['Cluster'].to_numpy(),args.outFilePrefix + 'mean_submatrices.png',vmin=vmin,vmax=vmax,colormap=colormap,plot_aggr_mode=plot_aggr_mode)
+        plot_diagnostic_heatmaps(submatrices,pairs['Cluster'].to_numpy(),args.outFilePrefix)
+
+        if(not args.devCorrelationPlotType is None):
+            log.info('computing correlation matrix')
+            corr_matrix = compute_correlation(submatrices,pairs['Cluster'],out_file_name=args.outFilePrefix + 'correlation_scatter.png')
+            log.info('plotting correlation heatmap')
+            plot_correlation(corr_matrix,pairs['Cluster'],args.outFilePrefix + 'correlation_heatmap.png', vmax=None,vmin=None, image_format=None)
+
+        dev_print_infos(pairs,clusters,dev_feature_type,dev_n_pairs,dev_n_regions,args.devEvaluation)
     
     log.info('Done')
