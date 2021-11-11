@@ -1,7 +1,7 @@
 import warnings
 warnings.simplefilter(action="ignore", category=RuntimeWarning)
 warnings.simplefilter(action="ignore", category=PendingDeprecationWarning)
-from hicexplorer import hicClusterContacts as hcc
+from hicexplorer import hicFindTADs
 from hicmatrix import HiCMatrix as hm
 from tempfile import mkdtemp
 import shutil
@@ -10,6 +10,9 @@ import numpy.testing as nt
 import numpy as np
 import pandas as pd
 from hicexplorer.test.test_compute_function import compute
+
+#TODO
+import hicClusterContacts as hcc
 
 #TODO
 ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "test_data/")
@@ -27,17 +30,6 @@ def test_obs_exp_normalization():
 def test_read_regions_bed():
     df = hcc.read_regions_bed(ROOT + 'unittest_regions.bed')
     assert df.shape == (37, 7) and df.iloc[0, 0] == '2L'
-    
-def test_get_positions():
-    m = hcc.read_matrix_file(ROOT + 'unittest_matrix.h5', None)
-    pos = hcc.get_positions(m)
-    assert pos['Start'].iloc[4] == 1829
-
-def test_build_position_index():
-    m = hcc.read_matrix_file(ROOT + 'unittest_matrix.h5', None)
-    pos = hcc.get_positions(m)    
-    index = hcc.build_position_index(pos)
-    assert index[('2L',1829)] == 4
     
 def test_get_pairs():
     m = hcc.read_matrix_file(ROOT + 'unittest_matrix.h5', None)
@@ -64,6 +56,8 @@ def test_get_features():
     regions,pairs,submatrices = hcc.get_submatrices(m,regions,pairs,submatrix_size=9)
     features = hcc.get_features(submatrices,center_size=0.25,corner_position='upper_left',corner_size=2)
     assert np.nanmax(features) > 0
+    assert features.shape[0] == len(submatrices)
+    assert features.shape[1] == 9
     
 def test_get_feature_matrix():
     m = hcc.read_matrix_file(ROOT + 'unittest_matrix.h5', None)
@@ -73,6 +67,8 @@ def test_get_feature_matrix():
     features = hcc.get_features(submatrices,center_size=0.25,corner_position='upper_left',corner_size=2)
     feature_matrix = hcc.get_feature_matrix(pairs,features,regions)
     assert np.nanmax(feature_matrix) > 0
+    assert feature_matrix.shape[0] == regions.shape[0]
+    assert feature_matrix.shape[1] == regions.shape[0]*9
 
 def test_perform_clustering():
     m = hcc.read_matrix_file(ROOT + 'unittest_matrix.h5', None)
@@ -81,34 +77,63 @@ def test_perform_clustering():
     regions,pairs,submatrices = hcc.get_submatrices(m,regions,pairs,submatrix_size=9)
     features = hcc.get_features(submatrices,center_size=0.25,corner_position='upper_left',corner_size=2)
     feature_matrix = hcc.get_feature_matrix(pairs,features,regions)
-    clusters = hcc.perform_clustering(feature_matrix,3)
-    c = pd.Series(clusters)
-    assert len(c.unique()) > 1
     
-def test_output_results():
+    umap_args = {}
+    umap_args['random_state'] = 0
+    umap_args['min_dist'] = 0.1
+    umap_args['n_neighbors'] = 100
+    umap_args['metric'] = 'correlation'
+    args = None
+    
+    reduced = hcc.perform_clustering_preprocessing(feature_matrix,umap_args)
+    clusters = hcc.perform_clustering(reduced,3,args,cluster_algorithm='kmeans')
+    c = pd.Series(clusters)
+    assert len(c.unique()) == 3
+    assert len(clusters) == len(feature_matrix)
+    
+def test_output_results_regions():
     m = hcc.read_matrix_file(ROOT + 'unittest_matrix.h5', None)
     regions = hcc.read_regions_bed(ROOT + 'unittest_regions.bed')
     pairs = hcc.get_pairs(regions,min_distance=1000000,max_distance=20000000,resolution=1)
     regions,pairs,submatrices = hcc.get_submatrices(m,regions,pairs,submatrix_size=9)
     features = hcc.get_features(submatrices,center_size=0.25,corner_position='upper_left',corner_size=2)
     feature_matrix = hcc.get_feature_matrix(pairs,features,regions)
-    clusters = hcc.perform_clustering(feature_matrix,3)
-    test_folder = mkdtemp(prefix="test_case_cluster_contacts")
-    pairs['Cluster'] = hcc.region_to_pair_labels(pairs,clusters,'Cluster')
-    hcc.output_results(test_folder + 'test_output.bed',pairs)
-    bed_df = pd.read_csv(test_folder + 'test_output.bed', sep="\t", header=None)
-    assert len(bed_df) == 170
     
-def test_output_results_alt():
+    umap_args = {}
+    umap_args['random_state'] = 0
+    umap_args['min_dist'] = 0.1
+    umap_args['n_neighbors'] = 100
+    umap_args['metric'] = 'correlation'
+    args = None
+    
+    reduced = hcc.perform_clustering_preprocessing(feature_matrix,umap_args)
+    clusters = hcc.perform_clustering(reduced,3,args,cluster_algorithm='kmeans')
+    test_folder = mkdtemp(prefix="test_case_cluster_contacts")
+    hcc.output_results_regions(test_folder + 'test_output.bed',regions,clusters)
+    
+    bed_df = pd.read_csv(test_folder + 'test_output.bed', sep="\t", header=None)
+    assert bed_df.shape[0] == regions.shape[0]
+    
+def test_output_results_pairs():
     m = hcc.read_matrix_file(ROOT + 'unittest_matrix.h5', None)
     regions = hcc.read_regions_bed(ROOT + 'unittest_regions.bed')
     pairs = hcc.get_pairs(regions,min_distance=1000000,max_distance=20000000,resolution=1)
     regions,pairs,submatrices = hcc.get_submatrices(m,regions,pairs,submatrix_size=9)
     features = hcc.get_features(submatrices,center_size=0.25,corner_position='upper_left',corner_size=2)
-    clusters = hcc.perform_clustering(features,3)
+    
+    umap_args = {}
+    umap_args['random_state'] = 0
+    umap_args['min_dist'] = 0.1
+    umap_args['n_neighbors'] = 100
+    umap_args['metric'] = 'correlation'
+    args = None
+    
+    reduced = hcc.perform_clustering_preprocessing(features,umap_args,n_components=3)
+    clusters = hcc.perform_clustering(reduced,3,args,cluster_algorithm='kmeans')
     test_folder = mkdtemp(prefix="test_case_cluster_contacts")
     pairs['Cluster'] = clusters
     hcc.output_results(test_folder + 'test_output.bed',pairs)
+    
     bed_df = pd.read_csv(test_folder + 'test_output.bed', sep="\t", header=None)
     assert len(bed_df) == 170
 
@@ -118,13 +143,22 @@ def test_plot_results():
     pairs = hcc.get_pairs(regions,min_distance=1000000,max_distance=20000000,resolution=1)
     regions,pairs,submatrices = hcc.get_submatrices(m,regions,pairs,submatrix_size=9)
     features = hcc.get_features(submatrices,center_size=0.25,corner_position='upper_left',corner_size=2)
-    feature_matrix = hcc.get_feature_matrix(pairs,features,regions)
-    clusters = hcc.perform_clustering(features,3)
+
+    umap_args = {}
+    umap_args['random_state'] = 0
+    umap_args['min_dist'] = 0.1
+    umap_args['n_neighbors'] = 100
+    umap_args['metric'] = 'correlation'
+    args = None
+    
+    reduced = hcc.perform_clustering_preprocessing(features,umap_args,n_components=3)
+    clusters = hcc.perform_clustering(reduced,3,args,cluster_algorithm='kmeans')
     test_folder = mkdtemp(prefix="test_case_cluster_contacts")
-    pairs['Cluster'] = hcc.region_to_pair_labels(pairs,clusters,'Cluster')
-    hcc.plot_results(features,clusters,test_folder + 'test_output_fig.png')
-    #plot_results(features,clusters,'test_output_fig.png')
+    pairs['Cluster'] = clusters   
+    
+    hcc.plot_results(reduced,features,clusters,test_folder + 'test_output_fig.png')
     assert True
+    #assert os.path.isfile(test_folder + 'test_output_fig.png')
 
 def test_plot_submatrices():
     m = hcc.read_matrix_file(ROOT + 'unittest_matrix.h5', None)
@@ -132,9 +166,16 @@ def test_plot_submatrices():
     pairs = hcc.get_pairs(regions,min_distance=1000000,max_distance=20000000,resolution=1)
     regions,pairs,submatrices = hcc.get_submatrices(m,regions,pairs,submatrix_size=9)
     features = hcc.get_features(submatrices,center_size=0.25,corner_position='upper_left',corner_size=2)
-    clusters = hcc.perform_clustering(features,3)
-    #min_value = np.min(m.matrix)
-    #max_value = np.max(m.matrix)
+    
+    umap_args = {}
+    umap_args['random_state'] = 0
+    umap_args['min_dist'] = 0.1
+    umap_args['n_neighbors'] = 100
+    umap_args['metric'] = 'correlation'
+    args = None
+    
+    reduced = hcc.perform_clustering_preprocessing(features,umap_args,n_components=3)
+    clusters = hcc.perform_clustering(reduced,3,args,cluster_algorithm='kmeans')
     min_value=None
     max_value=None
     test_folder = mkdtemp(prefix="test_case_plot_submatrices")
@@ -166,4 +207,3 @@ def test_get_random_regions():
     assert r['End'][0] - r['Start'][0] == region_size
     assert np.min(r['Start'].to_numpy()) >= region_start
     assert np.max(r['Start'].to_numpy()) <= region_end
-

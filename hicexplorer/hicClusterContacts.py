@@ -18,17 +18,12 @@ from sklearn import metrics
 import matplotlib.gridspec as gridspec
 import matplotlib.cm as cm
 import umap
-import umap.plot
-import hdbscan
-from sklearn.mixture import GaussianMixture
 import seaborn as sns
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from matplotlib.colors import LogNorm
 from matplotlib import use as mplt_use
 from matplotlib.ticker import FixedLocator
-from scipy.stats import pearsonr, spearmanr
 import random
-import hicClusterContactsAutoEncoder as hccae
 from os.path import exists
 
 #import HiCExplorer
@@ -50,8 +45,6 @@ def parse_arguments(args=None):
         formatter_class=argparse.RawDescriptionHelpFormatter,
         conflict_handler='resolve',
         description="""
-        TODO
-        
 $ hicClusterContacts
         """)
 
@@ -77,14 +70,14 @@ $ hicClusterContacts
     parserOpt = parser.add_argument_group('Optional arguments')
 
     parserOpt.add_argument('--normalization',
-                           help='set normalization method. Default: obs_exp',
+                           help='set normalization method. Choose no_normalization, if matrix is already normalized. Default: obs_exp_pearon_correlation',
                            type=str,
                            choices=[
                                'obs_exp',
-                               'liebermann_aiden',
-                               'non-zero'
+                               'obs_exp_pearson_correlation',
+                               'no_normalization'
                            ],
-                           default='obs_exp')
+                           default='obs_exp_pearson_correlation')
 
     parserOpt.add_argument('--minRange',
                            help='only contacts within the given range are considered',
@@ -94,12 +87,12 @@ $ hicClusterContacts
     parserOpt.add_argument('--maxRange',
                            help='only contacts within the given range are considered',
                            type=int,
-                           default=3000000)
+                           default=30000000000)
 
     parserOpt.add_argument('--submatrixCenterSize',
                            help='size of central feature square',
                            type=float,
-                           default=0.2)
+                           default=0.1)
     
     parserOpt.add_argument('--cornerPosition',
                            help='which corner position to use for submatrix normalization',
@@ -121,31 +114,29 @@ $ hicClusterContacts
     parserOpt.add_argument('--submatrixSize',
                            help='size of submatrices',
                            type=int,
-                           default=25)
+                           default=30)
     
     parserOpt.add_argument('--clusterAlgorithm',
                            choices=[
                                'kmeans',
-                               'agglomerative_hierarchical',
-                               'gaussian_mixture',
-                               'hdbscan'
+                               'agglomerative_hierarchical'
                            ],
                            help='cluster algorithm to use for computation',
                            type=str,
-                           default='kmeans')
+                           default='agglomerative_hierarchical')
 
     parserOpt.add_argument('--threads', '-t',
                            help='number of threads used',
                            default=4,
                            type=int)
     
-    parserOpt.add_argument('--devFeatureType',
+    parserOpt.add_argument('--featureType',
                            choices=[
                                'per_region_aggregated',
                                'per_pair_flattened',
                                'per_region_flattened'
                            ],
-                           default='per_pair_flattened',
+                           default='per_region_flattened',
                            help='for development: use features per region or per pair')
     
     parserOpt.add_argument('--scatterPlotType',
@@ -169,13 +160,6 @@ $ hicClusterContacts
                            type=str,
                            help='set output plot colormap')
     
-    parserOpt.add_argument('--plotAggrMode',
-                           choices=[
-                               'mean',
-                               'median'
-                           ],
-                           default='mean',
-                           help='whether plotted submatrices use mean or median aggregation')
     
     parserOpt.add_argument('--regionPositionType',
                            default=None,
@@ -187,28 +171,27 @@ $ hicClusterContacts
                                None],
                            help='determine positioning type for regions')
     
-    parserOpt.add_argument('--devPreprocessingType',
+    parserOpt.add_argument('--preprocessingType',
                            choices=[
                                'pca',
                                'umap',
-                               'autoencoder',
                                'pca_umap',
                                None
                            ],
-                           default='pca',
+                           default='umap',
                            help='choose clustering preprocessing')
     
-    parserOpt.add_argument('--devNComponents',
-                           default=5,
+    parserOpt.add_argument('--nComponents',
+                           default=20,
                            type=int,
                            help='number of components for pre-processing')
     
-    parserOpt.add_argument('--devUmapNNeighbours',
-                           default=15,
+    parserOpt.add_argument('--umapNNeighbours',
+                           default=100,
                            type=int,
                            help='umap hyperparameter')
     
-    parserOpt.add_argument('--devUmapMetric',
+    parserOpt.add_argument('--umapMetric',
                            choices=[
                             'euclidean',
                             'manhattan',
@@ -223,25 +206,25 @@ $ hicClusterContacts
                             'cosine',
                             'correlation'
                            ],
-                           default='euclidean',
+                           default='correlation',
                            help='number of components for pre-processing')
     
-    parserOpt.add_argument('--devUmapMinDist',
+    parserOpt.add_argument('--umapMinDist',
                            default=0.1,
                            type=float,
                            help='umap hyperparameter')
     
-    parserOpt.add_argument('--devOutlierCroppingMin',
+    parserOpt.add_argument('--outlierCroppingMin',
                            default=None,
                            type=int,
                            help='min value for outlier cropping')
     
-    parserOpt.add_argument('--devOutlierCroppingMax',
+    parserOpt.add_argument('--outlierCroppingMax',
                            default=None,
                            type=int,
                            help='max value for outlier cropping')
     
-    parserOpt.add_argument('--devEvaluation',
+    parserOpt.add_argument('--evaluation',
                            default=None,
                            type=str,
                            choices=[
@@ -255,7 +238,7 @@ $ hicClusterContacts
                            type=int,
                            help='number of random regions for evaluation')    
           
-    parserOpt.add_argument('--devTestLabels',
+    parserOpt.add_argument('--testLabels',
                            default=None,
                            type=str,
                            help='path to test labels')    
@@ -271,53 +254,16 @@ $ hicClusterContacts
                             None,
                             'log1p'
                            ],
-                           help='Chooses whether to transform the submatrices before clustering')
+                           help='Chooses whether to transform the submatrices to log1p before clustering')
     
-    parserOpt.add_argument('--devCorrelationPlotType',
-                           default=None,
-                           type=str,
-                           choices=[
-                               'pearson',
-                               'spearman',
-                               None],
-                           help='output correlation plot')
-    
-    parserOpt.add_argument('--devFeatureOutfile',
-                           default=None,
-                           type=str,
-                           help='output file containing features')
-    
-    parserOpt.add_argument('--devAutoEncoderFile',
-                           default=None,
-                           type=str,
-                           help='output file containing features')
-    
-    parserOpt.add_argument('--testBetweenTestLabels',
-                           default='True',
+    parserOpt.add_argument('--alternativePairLabelAssignment',
+                           default='False',
                            choices=[
                                'True',
                                'False'
                            ],
                            type=str,
-                           help='test')
-    
-    parserOpt.add_argument('--plotRegionClustermap',
-                           default='True',
-                           choices=[
-                               'True',
-                               'False'
-                           ],
-                           type=str,
-                           help='test')    
-    
-    parserOpt.add_argument('--devOtherLabelAssignment',
-                           default='True',
-                           choices=[
-                               'True',
-                               'False'
-                           ],
-                           type=str,
-                           help='test')
+                           help='when producing pair interaction labels from region labels, assign all interactions between cluster 0 and 0 to group 0 and all others to group 1')
     
     parserOpt.add_argument('--agglLinkage',
                            default='ward',
@@ -328,7 +274,7 @@ $ hicClusterContacts
                             'single'
                            ],
                            type=str,
-                           help='test')    
+                           help='linkage criterium for Agglomerative Hierarchical Clustering')    
     
     parserOpt.add_argument('--agglMetric',
                            default='euclidean',
@@ -341,7 +287,7 @@ $ hicClusterContacts
                                'precomputed'
                            ],
                            type=str,
-                           help='test')    
+                           help='metric for Agglomerative Hierarchical Clustering')    
 
     parserOpt.add_argument("--help", "-h", action="help",
                            help="show this help message and exit")
@@ -371,6 +317,7 @@ def read_matrix_file(matrix_file, pChromosome):
 
 def obs_exp_normalization(hic_ma, pThreads=None):
     '''apply obs_exp normalization'''
+    
     log.debug('obs/exp matrix computation...')
 
     trasf_matrix = lil_matrix(hic_ma.matrix.shape)
@@ -398,6 +345,43 @@ def obs_exp_normalization(hic_ma, pThreads=None):
         cut_intervals=hic_ma.cut_intervals)
     log.debug('obs/exp matrix computation... DONE')
 
+    return hic_ma
+
+def pearson_correlation(hic_ma, pThreads=None):
+    '''apply pearson correlation transformation to matrix'''
+    
+    log.debug('pearson correlation matrix computation...')
+    trasf_matrix = lil_matrix(hic_ma.matrix.shape)
+    
+    def _pearson(pSubmatrix):
+        pearson_correlation_matrix = np.corrcoef(pSubmatrix)
+        pearson_correlation_matrix = convertNansToZeros(csr_matrix(pearson_correlation_matrix))
+        pearson_correlation_matrix = convertInfsToZeros(csr_matrix(pearson_correlation_matrix))
+        # if len(pearson_correlation_matrix.data) == 0:
+        # return np.array([[]])
+        return pearson_correlation_matrix  # .todense()
+    
+    for chrname in hic_ma.getChrNames():
+        chr_range = hic_ma.getChrBinRange(chrname)
+        submatrix = hic_ma.matrix[chr_range[0]:chr_range[1], chr_range[0]:chr_range[1]]
+
+        submatrix.astype(float)
+
+        submatrix_chr = _pearson(submatrix.todense())
+
+        if len(submatrix_chr.data) == 0:
+            submatrix_chr = lil_matrix(submatrix_chr.shape)
+        else:
+            submatrix_chr = lil_matrix(submatrix_chr)
+
+        trasf_matrix[chr_range[0]:chr_range[1], chr_range[0]:chr_range[1]] = submatrix_chr
+    
+    hic_ma.setMatrix(
+        trasf_matrix.tocsr(),
+        cut_intervals=hic_ma.cut_intervals)
+    
+    log.debug('pearson correlation matrix computation... DONE')
+    
     return hic_ma
 
 def read_regions_bed(bed_file):
@@ -481,7 +465,7 @@ def get_pairs(regions,min_distance=1000000,max_distance=3000000,resolution=1):
     
     return pairs
 
-def get_submatrices(matrix,regions,pairs,submatrix_size=9,position_type='Start',testBetweenTestLabels='True'):
+def get_submatrices(matrix,regions,pairs,submatrix_size=30,position_type='Start',testBetweenTestLabels='True'):
     """collect submatrices for every pair of regions"""
     
     assert not matrix is None
@@ -569,7 +553,7 @@ def get_submatrices(matrix,regions,pairs,submatrix_size=9,position_type='Start',
     
     return regions,pairs,submatrices
     
-def get_features(submatrices,center_size=0.2,corner_position=None,corner_size=2):
+def get_features(submatrices,center_size=0.1,corner_position=None,corner_size=2):
     '''select features from the given submatrices'''
     
     #compute center square of matrix
@@ -664,18 +648,6 @@ def perform_clustering(features,k,args,cluster_algorithm='agglomerative_hierarch
         clustering = skclust.AgglomerativeClustering(n_clusters=k,linkage=args.agglLinkage,affinity=args.agglMetric).fit(features)
         cluster_labels = clustering.labels_
         
-    elif(cluster_algorithm == 'gaussian_mixture'):
-        clustering = GaussianMixture(n_components=k, random_state=random_state).fit(features)
-        cluster_labels = clustering.predict(features)
-        
-    elif(cluster_algorithm == 'hdbscan'):
-        clustering = hdbscan.HDBSCAN(min_cluster_size=10, random_state=random_state)
-        cluster_labels = clustering.fit_predict(features)
-        
-    elif(cluster_algorithm == 'community_detection'):
-        #reformulate as graph community detection problem using python igraph
-        raise NotImplementedError
-        
     else:
         raise ValueError
 
@@ -720,7 +692,7 @@ def perform_plotting_preprocessing(features,features_raw,n_components=3,preproce
 
     elif(preprocessing_type in ['umap','pca_umap']):
         if(umap_args is None):
-            um = umap.UMAP(n_components=n_components, init='random', random_state=42)
+            um = umap.UMAP(n_components=n_components, init='random', random_state=0)
         else:
             um = umap.UMAP(n_components=n_components, init='random', random_state=umap_args['random_state'],metric=umap_args['metric'], n_neighbors=umap_args['n_neighbors'], min_dist=umap_args['min_dist'])
             
@@ -739,7 +711,7 @@ def perform_plotting_preprocessing(features,features_raw,n_components=3,preproce
     
     return embedder,reduced
 
-def perform_clustering_preprocessing(features,preprocessing_type=None,n_components=20,encoder_file = None,random_state=0,umap_args=None):
+def perform_clustering_preprocessing(features,preprocessing_type=None,n_components=20,random_state=0,umap_args=None):
     '''perform preprocessing for clustering'''
     
     assert features.shape[1] >= n_components
@@ -747,7 +719,7 @@ def perform_clustering_preprocessing(features,preprocessing_type=None,n_componen
     Sc = StandardScaler()
     features = Sc.fit_transform(features)
     
-    def perform_clustering_preprocessing_int(features, preprocessing_type=None, n_components=20, encoder_file = None,random_state=0,umap_args=None):
+    def perform_clustering_preprocessing_int(features, preprocessing_type=None, n_components=20, random_state=0, umap_args=None):
     
         if(preprocessing_type == 'umap'):
             if(umap_args is None):
@@ -757,10 +729,6 @@ def perform_clustering_preprocessing(features,preprocessing_type=None,n_componen
 
         if(preprocessing_type == 'pca'):
             return PCA(n_components=n_components).fit_transform(features)
-
-        if(preprocessing_type == 'autoencoder'):
-            assert not encoder_file is None
-            return hccae.dimensionality_reduction(features,encoder_file)
 
         else:
             return features
@@ -776,11 +744,11 @@ def perform_clustering_preprocessing(features,preprocessing_type=None,n_componen
         features = perform_clustering_preprocessing_int(features, preprocessing_type='umap', n_components=n_components, umap_args=umap_args,random_state=random_state)
         
     else:
-        features = perform_clustering_preprocessing_int(features, preprocessing_type=preprocessing_type, n_components=n_components, umap_args=umap_args, encoder_file = encoder_file,random_state=random_state)
+        features = perform_clustering_preprocessing_int(features, preprocessing_type=preprocessing_type, n_components=n_components, umap_args=umap_args,random_state=random_state)
         
     return features
     
-def plot_results(features,features_raw,clusters,out_file_prefix,scatter_plot_type='3d',preprocessing_type=None,title=None,umap_args=None):
+def plot_results(features, features_raw, clusters, out_file_prefix, scatter_plot_type='3d', preprocessing_type=None, title=None, umap_args=None):
     '''plot clustering results'''
     
     fig = plt.figure(dpi=150)
@@ -817,24 +785,9 @@ def plot_results(features,features_raw,clusters,out_file_prefix,scatter_plot_typ
     if(not title is None):
         ax.set_title(title)
     
-    #fig.show()
+    fig.show()
     fig.savefig(out_file_prefix + '_scatter_plot.png')
-    plt.close()
-    
-    if(preprocessing_type in ['umap','pca_umap']):
-        embedder,components = perform_plotting_preprocessing(features, features_raw, n_components=2, preprocessing_type=preprocessing_type,umap_args=umap_args)      
-        
-        ax = umap.plot.points(embedder,labels=clusters)
-        ax.figure.savefig(out_file_prefix + '_umap_points.png',dpi=300)
-        plt.close()
-        
-        ax = umap.plot.connectivity(embedder, show_points=True)
-        ax.figure.savefig(out_file_prefix + '_umap_connectivity.png',dpi=300)
-        plt.close()
-        
-        ax = umap.plot.diagnostic(embedder, diagnostic_type='pca')
-        ax.figure.savefig(out_file_prefix + '_umap_diagnostic.png',dpi=300)
-        plt.close()        
+    plt.close()   
     
 def submatrix_list_to_matrix(submatrices):
     '''reshape list of matrices to a big matrix. Each row corresponds to one '''
@@ -1164,17 +1117,17 @@ def print_binary_pair_labels(pairs,clusters,dev_evaluation,prefix,features, feat
     plot_results(features,features_raw,pairs['TestLabel'],out_file_fig_test_labels,scatter_plot_type = scatter_plot_type,preprocessing_type=preprocessing_type,title=None,umap_args=umap_args)
     
 def print_infos_per_regions(regions,clusters,dev_evaluation,prefix,features,features_raw, scatter_plot_type = '3d',preprocessing_type=None,umap_args=None):
-    '''print clustering output'''
+    '''print additional output, when using test labels'''
     
     if(dev_evaluation is None):
-        print(regions[['RegionIndex','Cluster']])
+        #print(regions[['RegionIndex','Cluster']])
         return
         
     out_file_fig_test_labels = prefix + '_test_labels'
     score = dev_evaluation_function(regions['TestLabel'],clusters)
     title = 'rand_score: ' + str(score)
     
-    print(regions[['RegionIndex','Cluster','TestLabel']])
+   #print(regions[['RegionIndex','Cluster','TestLabel']])
     
     score_matrix = regions[['Cluster','TestLabel']].reset_index().groupby(['Cluster','TestLabel'],as_index=False).size().pivot('TestLabel','Cluster')
     
@@ -1187,11 +1140,11 @@ def print_infos_per_regions(regions,clusters,dev_evaluation,prefix,features,feat
     title = 'rand_score: ' + str(score)
     score_df = pd.DataFrame({'rand_score': [score],
                             'homogeneity_score': [metrics.homogeneity_score(regions['TestLabel'],clusters)],
-                             'completeness_score': [metrics.completeness_score(regions['TestLabel'],clusters)]
+                             'completeness_score': [metrics.completeness_score(regions['TestLabel'],clusters)],
+                             'adjusted_rand_score': [metrics.adjusted_rand_score(regions['TestLabel'],clusters)]
                             })
     
     score_df.to_csv('scores_region.txt',mode='a')
-    
     plot_results(features,features_raw,regions['TestLabel'],out_file_fig_test_labels,scatter_plot_type= scatter_plot_type, preprocessing_type= preprocessing_type,title=None,umap_args=umap_args)
 
 def dev_evaluation_function(test_labels,cluster_labels):
@@ -1210,247 +1163,6 @@ def dev_read_test_labels(test_label_file):
         raise ValueError('empty domain file passed')
         
     return test_label_df['TestLabel']
-
-#define parser and description
-
-def compute_correlation(submatrices,clusters_per_interaction,correlation_type='pearson',out_file_name=None):
-    '''compute correlation coefficient between the given subrmatrices'''
-    #code taken and adapted from hicCorrelate
-    
-    def get_vectors(mat1, mat2):
-        """
-        Uses sparse matrix tricks to convert
-        into a vector the matrix values such
-        that zero values that appear in only
-        one of the matrices is kept. But
-        zeros in two matrices are removed
-
-        Requires two sparse matrices as input
-        """
-        assert mat1.shape == mat2.shape, "Matrices have different shapes. "\
-            "Computation of correlation is not possible."
-
-        # create a new matrix that is the sum of the two
-        # matrices to compare. The goal is to have
-        # a matrix that contains all the positions
-        # that are non-zero in both matrices
-        _mat = mat1 + mat2
-
-        # add one to each element in the new matrix
-        _mat.data += 1
-
-        # get a vector of the values in mat1 from
-        # _mat
-        values1 = (_mat - mat1) - 1
-
-        # get a vector of the values in mat2 from
-        # _mat
-        values2 = (_mat - mat2) - 1
-
-        return values1, values2
-        
-    assert len(submatrices) == len(clusters_per_interaction)
-    matrices = submatrices
-    labels = clusters_per_interaction
-    num_files = len(matrices)
-    
-    #map(lambda x: os.path.basename(x), args.matrices)
-    # initialize results matrix
-    results = np.zeros((num_files, num_files), dtype='float')
-
-    rows, cols = np.triu_indices(num_files)
-    correlation_opts = {'spearman': spearmanr,
-                        'pearson': pearsonr}
-    hic_mat_list = []
-    max_value = None
-    min_value = None
-    all_mat = None
-    all_nan = []
-
-    for i, _mat in enumerate(matrices):
-
-        np.diagflat(_mat,0)
-        _mat = np.triu(_mat)
-        
-        if all_mat is None:
-            all_mat = _mat
-        else:
-            all_mat = all_mat + _mat
-
-        if max_value is None or max_value < np.max(_mat):
-            max_value = np.max(_mat)
-        if min_value is None or min_value > np.min(_mat):
-            min_value = np.min(_mat)
-
-        hic_mat_list.append(_mat)
-
-    big_mat = None
-    
-    for mat in hic_mat_list:
-        #mat = mat[rows_keep, :][:, cols_keep]
-        sample_vector = mat.flatten()
-        
-        if big_mat is None:
-            big_mat = sample_vector
-        else:
-            big_mat = np.vstack([big_mat, sample_vector])
-
-    # take the transpose such that columns represent each of the samples
-    big_mat = np.ma.masked_invalid(big_mat).T
-
-    grids = gridspec.GridSpec(num_files, num_files)
-    grids.update(wspace=0, hspace=0)
-    fig = plt.figure(figsize=(2 * num_files, 2 * num_files))
-    plt.rcParams['font.size'] = 8.0
-
-    min_value = int(np.min(big_mat))
-    max_value = int(np.max(big_mat))
-    
-    if (min_value % 2 == 0 and max_value % 2 == 0) or \
-            (min_value % 1 == 0 and max_value % 2 == 1):
-        # make one value odd and the other even
-        max_value += 1
-
-    for index in range(len(rows)):
-        row = rows[index]
-        col = cols[index]
-        if row == col:
-            results[row, col] = 1
-
-            # add titles as
-            # empty plot in the diagonal
-            ax = fig.add_subplot(grids[row, col])
-            ax.text(0.6, 0.6, 'scatter plot',
-                    verticalalignment='center',
-                    horizontalalignment='center',
-                    fontsize=10, fontweight='bold',
-                    transform=ax.transAxes)
-            ax.set_axis_off()
-            continue
-
-        #log.debug("comparing {} and {}\n".format(args.matrices[row],args.matrices[col]))
-
-        # remove cases in which both are zero or one is zero and
-        # the other is one
-        _mat = big_mat[:, [row, col]]
-        _mat = _mat[_mat.sum(axis=1) > 1, :]
-        vector1 = _mat[:, 0]
-        vector2 = _mat[:, 1]
-
-        results[row, col] = correlation_opts[correlation_type](vector1, vector2)[0]
-
-        # scatter plots
-        ax = fig.add_subplot(grids[row, col])
-
-        ax.text(0.2, 0.8, "{}={:.2f}".format(correlation_type,
-                                             results[row, col]),
-                horizontalalignment='left',
-                transform=ax.transAxes)
-        ax.get_yaxis().set_tick_params(
-            which='both',
-            left='off',
-            right='off',
-            direction='out')
-
-        ax.get_xaxis().set_tick_params(
-            which='both',
-            top='off',
-            bottom='off',
-            direction='out')
-
-        if col != num_files - 1:
-            ax.set_yticklabels([])
-        else:
-            ax.yaxis.tick_right()
-            ax.get_yaxis().set_tick_params(
-                which='both',
-                left='off',
-                right='on',
-                direction='out')
-        if col - row == 1:
-            ax.xaxis.tick_bottom()
-            ax.get_xaxis().set_tick_params(
-                which='both',
-                top='off',
-                bottom='on',
-                direction='out')
-        else:
-            ax.set_xticklabels([])
-
-        ax.hist2d(vector1, vector2, bins=150, cmin=0.1)
-        
-    fig.tight_layout()
-    
-    if(not out_file_name is None):
-        log.debug("saving {}".format(out_file_name))
-        fig.savefig(out_file_name, bbox_inches='tight')
-        
-    plt.close()
-    return results + np.triu(results, 1).T
-    
-def plot_correlation(corr_matrix, labels, out_file_name, vmax=None,
-                     vmin=None, colormap='Reds', image_format='png'):
-    '''plot the given correlation matrix'''
-    
-    #code taken and adapted from hicCorrelate
-    import scipy.cluster.hierarchy as sch
-    num_rows = corr_matrix.shape[0]
-
-    # set the minimum and maximum values
-    if vmax is None:
-        vmax = 1
-    if vmin is None:
-        vmin = 0 if corr_matrix.min() >= 0 else -1
-
-    # Compute and plot dendrogram.
-    fig = plt.figure(figsize=(10.5, 9.5))
-    axdendro = fig.add_axes([0.02, 0.1, 0.1, 0.7])
-    axdendro.set_axis_off()
-    y_var = sch.linkage(corr_matrix, method='complete')
-    z_var = sch.dendrogram(y_var, orientation='left',
-                           link_color_func=lambda k: 'black')
-    axdendro.set_xticks([])
-    axdendro.set_yticks([])
-    cmap = plt.get_cmap(colormap)
-
-    # this line simply makes a new cmap, based on the original
-    # colormap that goes from 0.0 to 0.9
-    # This is done to avoid colors that
-    # are too dark at the end of the range that do not offer
-    # a good contrast between the correlation numbers that are
-    # plotted on black.
-    cmap = cmap.from_list(colormap + "clipped", cmap([0.0, 0.8]))
-    # Plot distance matrix.
-    axmatrix = fig.add_axes([0.13, 0.1, 0.6, 0.7])
-    index = z_var['leaves']
-    corr_matrix = corr_matrix[index, :]
-    corr_matrix = corr_matrix[:, index]
-    img_mat = axmatrix.matshow(corr_matrix, aspect='equal', origin='lower',
-                               cmap=cmap, extent=(0, num_rows, 0, num_rows),
-                               vmax=vmax, vmin=vmin)
-    axmatrix.yaxis.tick_right()
-    axmatrix.set_yticks(np.arange(corr_matrix.shape[0]) + 0.5)
-    axmatrix.set_yticklabels(np.array(labels).astype('str')[index],
-                             fontsize=14)
-
-    axmatrix.set_xticks(np.arange(corr_matrix.shape[0]) + 0.5)
-    axmatrix.set_xticklabels(np.array(labels).astype('str')[index],
-                             fontsize=14,
-                             rotation=45,
-                             ha='left')
-
-#    axmatrix.set_xticks([])
-    # Plot colorbar.
-    axcolor = fig.add_axes([0.13, 0.065, 0.6, 0.02])
-    plt.colorbar(img_mat, cax=axcolor, orientation='horizontal')
-    for row in range(num_rows):
-        for col in range(num_rows):
-            axmatrix.text(row + 0.5, col + 0.5,
-                          "{:.2f}".format(corr_matrix[row, col]),
-                          ha='center', va='center')
-
-    fig.savefig(plot_filename, format=image_format)
-    plt.close()
     
 def plot_feature_matrix(feature_matrix,out_file_prefix,evaluation_labels=None,transform='log1p'):
     '''plot sorted feature matrix'''
@@ -1524,16 +1236,6 @@ def region_to_pair_labels_binary(pairs,labels,other_assignment='False'):
                 o['label'] = o['label'].replace(2,1)  
     
     return o['label']
-
-#def region_to_pair_labels_plots(pairs,labels):
-#    '''merge region labels to pairs'''
-    
-#    cl_df = pd.DataFrame(columns=['RegionLabel'])
-#    cl_df['RegionLabel'] = labels
-#    cl_df['RegionIndex'] = np.arange(0,labels.shape[0])      
-#    o = pd.merge(pairs[['RegionIndex']], cl_df, how='inner', left_on=['RegionIndex'], right_on=['RegionIndex'])
-    
-#    return o['RegionLabel'].to_numpy()
 
 def cluster_occurence_per_region(pairs,out_file_prefix,regions,dev_evaluation=None,random_state=0,umap_args=None):
     '''if dataset is clustered per pair, count occurences of clusters per region and build heatmap'''
@@ -1613,23 +1315,23 @@ def output_region_clustermap(out_file_prefix,features,clusters,test_labels,devEv
     else:
         row_colors = None
         
-    Sc = StandardScaler()
-    features = Sc.fit_transform(features)
-    features = PCA(n_components=3).fit_transform(features)
+    #Sc = StandardScaler()
+    #features = Sc.fit_transform(features)
+    #features = PCA(n_components=3).fit_transform(features)
 
-    data = {"component 1": features[:,0],
-            "component 2": features[:,1],
-            "component 3": features[:,2]}
+    #data = {"component 1": features[:,0],
+    #        "component 2": features[:,1],
+    #        "component 3": features[:,2]}
 
-    output = pd.DataFrame(data)
+    #output = pd.DataFrame(data)
     
-    grid = sns.clustermap(output,col_cluster=False,row_colors=row_colors)
-    grid.savefig(out_file_prefix + '_clustermap.png')
-    plt.close()
+    #grid = sns.clustermap(output,col_cluster=False,row_colors=row_colors)
+    #grid.savefig(out_file_prefix + '_clustermap.png')
+    #plt.close()
     
-    grid = sns.clustermap(output,col_cluster=False,row_cluster=False,row_colors=row_colors)
-    grid.savefig(out_file_prefix + '_sorted_map.png')
-    plt.close()
+    #grid = sns.clustermap(output,col_cluster=False,row_cluster=False,row_colors=row_colors)
+    #grid.savefig(out_file_prefix + '_sorted_map.png')
+    #plt.close()
     
     clusters = pd.DataFrame({'Cluster': clusters})
     grid = sns.clustermap(clusters,col_cluster=False,row_cluster=False,row_colors=row_colors)
@@ -1649,10 +1351,10 @@ def main(args=None):
     center_size = args.submatrixCenterSize
     cluster_algorithm = args.clusterAlgorithm
     k = args.numberOfOutputClusters
-    dev_feature_type = args.devFeatureType
-    preprocessing_type = args.devPreprocessingType
-    outlier_min = args.devOutlierCroppingMin
-    outlier_max = args.devOutlierCroppingMax
+    dev_feature_type = args.featureType
+    preprocessing_type = args.preprocessingType
+    outlier_min = args.outlierCroppingMin
+    outlier_max = args.outlierCroppingMax
     corner_position = args.cornerPosition
     print(center_size)
     
@@ -1672,14 +1374,14 @@ def main(args=None):
     vmin = args.vmin
     vmax = args.vmax
     colormap = args.colormap
-    plot_aggr_mode = args.plotAggrMode
+    plot_aggr_mode = 'mean'
     scatter_plot_type = args.scatterPlotType
     
     umap_args = {}
     umap_args['random_state'] = args.randomSeed
-    umap_args['min_dist'] = args.devUmapMinDist
-    umap_args['n_neighbors'] = args.devUmapNNeighbours
-    umap_args['metric'] = args.devUmapMetric
+    umap_args['min_dist'] = args.umapMinDist
+    umap_args['n_neighbors'] = args.umapNNeighbours
+    umap_args['metric'] = args.umapMetric
     #check for faulty parameters
     
     #ingest matrix file(s)
@@ -1699,9 +1401,11 @@ def main(args=None):
     dev_n_regions = all_regions.shape[0]
     log.info('regions in bed file: ' + str(dev_n_regions))
     
-    if(args.devEvaluation == 'provide_test_labels'):
-        assert not args.devTestLabels is None
-        test_labels = dev_read_test_labels(args.devTestLabels)
+    if(args.evaluation == 'provide_test_labels'):
+        
+        log.info('reading test labels')
+        assert not args.testLabels is None
+        test_labels = dev_read_test_labels(args.testLabels)
           
     else:
         test_labels = np.zeros(all_regions.shape[0])
@@ -1710,14 +1414,20 @@ def main(args=None):
     
     log.info('normalizing matrix file')
     #normalize matrix file(s)
-    #matrix = obs_exp_normalization(matrix, pThreads=threads)
+    if(args.normalization == 'obs_exp'):
+        matrix = obs_exp_normalization(matrix, pThreads=threads)
+    
+    elif(args.normalization == 'obs_exp_pearson_correlation'):
+        matrix = obs_exp_normalization(matrix, pThreads=threads)
+        matrix = pearson_correlation(matrix, pThreads=threads)
     
     for c in chromosomes:
         log.info('running for chromosome ' + str(c))
         regions = all_regions[all_regions['Chrom'] == c]
         log.info('numbers of regions on chromosome: ' + str(regions.shape[0]))
         
-        if(args.devEvaluation == 'test_against_random'):
+        if(args.evaluation == 'test_against_random'):
+            log.info('')
             regions,test_labels = mix_with_random_regions(regions, region_start=None, region_end=None, n_random_regions=args.nRandomRegions)
 
             log.info('random and non-random regions: ' + str(regions.shape[0]))         
@@ -1736,10 +1446,10 @@ def main(args=None):
         log.info('number of pairs on chromosome: ' + str(pairs.shape[0]))
 
         log.info('cutting out submatrices for interaction pairs')
-        pairs['TestLabel'] = region_to_pair_labels_binary(pairs,regions['TestLabel'],other_assignment=args.devOtherLabelAssignment)
+        pairs['TestLabel'] = region_to_pair_labels_binary(pairs,regions['TestLabel'],other_assignment=args.alternativePairLabelAssignment)
         
         #cut out submatrices
-        regions, pairs, submatrices = get_submatrices(matrix,regions,pairs,submatrix_size,position_type=region_position_type, testBetweenTestLabels=args.testBetweenTestLabels)
+        regions, pairs, submatrices = get_submatrices(matrix,regions,pairs,submatrix_size,position_type=region_position_type, testBetweenTestLabels='True')
 
         log.info('valid submatrices: ' + str(len(submatrices)))
         log.info('aggregating features for clustering')
@@ -1747,58 +1457,65 @@ def main(args=None):
         features = get_features(submatrices,center_size=center_size,corner_position=corner_position,corner_size=corner_size)
         features = outlier_cropping_and_transformation(features,min_value=outlier_min,max_value=outlier_max,transform=args.transform)
         
-        if(not args.devFeatureOutfile is None):
-            np.savetxt(args.devFeatureOutfile,features)
-        
+        log.info('plotting feature distribution')
         plot_density(features,out_file_prefix)
 
-        assert not preprocessing_type == 'autoencoder' or (not args.devAutoEncoderFile is None and dev_feature_type == 'per_pair_flattened')
-
         if(dev_feature_type == 'per_region_flattened' or dev_feature_type == 'per_region_aggregated'):
+            
+            log.info('chosen mode: region clustering')
+            log.info('building feature matrix')
             features_per_pair = features
             features = get_feature_matrix(pairs,features,regions,dev_feature_type = dev_feature_type)
             feature_matrix = features
             features_raw = features
             
-            log.info('clustering')
             #cluster submatrices
-            features = perform_clustering_preprocessing(features,preprocessing_type=preprocessing_type, n_components= args.devNComponents,random_state=args.randomSeed,umap_args=umap_args)
+            log.info('performing dimensionality reduction')
+            features = perform_clustering_preprocessing(features,preprocessing_type=preprocessing_type, n_components= args.nComponents,random_state=args.randomSeed,umap_args=umap_args)
+            
+            log.info('clustering')
             clusters = perform_clustering(features,k,args,cluster_algorithm=cluster_algorithm,random_state=args.randomSeed)
             regions['Cluster'] = clusters
 
             log.info('writing results to file')
-            
-            output_region_clustermap(out_file_prefix,features_raw,clusters,regions['TestLabel'],args.devEvaluation)   
+            output_region_clustermap(out_file_prefix,features_raw,clusters,regions['TestLabel'],args.evaluation)   
             output_results_regions(out_file_contact_pairs,regions,clusters)
-            print_infos_per_regions(regions, clusters, args.devEvaluation, out_file_prefix, features, features_raw, scatter_plot_type = scatter_plot_type, preprocessing_type=preprocessing_type,umap_args=umap_args)
+            print_infos_per_regions(regions, clusters, args.evaluation, out_file_prefix, features, features_raw, scatter_plot_type = scatter_plot_type, preprocessing_type=preprocessing_type,umap_args=umap_args)
             
-            if(not 'devEvaluation' is None):
-                regions[['Chrom','Start','End','Cluster','TestLabel']].to_csv(out_file_prefix + 'cluster_test_label_evaluation.csv',sep=';')
-                
-            if(len(regions['Cluster'].unique()) == 2):
-                pairs['Cluster'] = region_to_pair_labels_binary(pairs,clusters,other_assignment=args.devOtherLabelAssignment)
-                
-                plot_submatrices(submatrices,pairs['Cluster'].to_numpy(),out_file_prefix + 'mean_submatrices.png',vmin=vmin,vmax=vmax,colormap=colormap,plot_aggr_mode=plot_aggr_mode,transform=plot_transform)
-                plot_diagnostic_heatmaps(submatrices,pairs['Cluster'].to_numpy(),out_file_prefix,transform=plot_transform)
-                
-                if(not 'devEvaluation' is None):                
-                    plot_submatrices(submatrices,pairs['TestLabel'].to_numpy(),out_file_prefix + 'mean_submatrices_test_label.png',vmin=vmin,vmax=vmax,colormap=colormap,plot_aggr_mode=plot_aggr_mode,transform=plot_transform)
-                    plot_diagnostic_heatmaps(submatrices,pairs['Cluster'].to_numpy(),out_file_prefix + '_test_label_',transform=plot_transform)
-                    #print_binary_pair_labels(pairs, pairs['Cluster'], args.devEvaluation, out_file_prefix + '_pairs_', features_per_pair, features_per_pair, scatter_plot_type = scatter_plot_type, preprocessing_type=None,umap_args=umap_args)
-                    
             log.info('plotting feature matrix')
             features_plot = get_feature_matrix(pairs,features_per_pair,regions,dev_feature_type = 'per_region_aggregated')
             plot_feature_matrix(feature_matrix, out_file_prefix, evaluation_labels=regions['TestLabel'], transform=plot_transform)
                 
             log.info('plotting results in scatter plot')
-            plot_results(features,features_raw,clusters,out_file_fig,scatter_plot_type = scatter_plot_type,preprocessing_type=preprocessing_type,umap_args=umap_args)             
+            plot_results(features,features_raw,clusters,out_file_fig,scatter_plot_type = scatter_plot_type,preprocessing_type=preprocessing_type,umap_args=umap_args)
+            
+            if(not args.evaluation is None):
+                log.info('writing file containing cluster and test labels')
+                regions[['Chrom','Start','End','Cluster','TestLabel']].to_csv(out_file_prefix + 'cluster_test_label_evaluation.csv',sep=';')
+                
+            if(len(regions['Cluster'].unique()) == 2):
+                
+                log.info('output additional plots')
+                pairs['Cluster'] = region_to_pair_labels_binary(pairs, clusters, other_assignment= args.alternativePairLabelAssignment)
+                
+                plot_submatrices(submatrices,pairs['Cluster'].to_numpy(),out_file_prefix + 'mean_submatrices.png',vmin=vmin,vmax=vmax,colormap=colormap,plot_aggr_mode=plot_aggr_mode,transform=plot_transform)
+                plot_diagnostic_heatmaps(submatrices,pairs['Cluster'].to_numpy(),out_file_prefix,transform=plot_transform)
+                
+                if(not args.evaluation is None):                
+                    plot_submatrices(submatrices,pairs['TestLabel'].to_numpy(),out_file_prefix + 'mean_submatrices_test_label.png',vmin=vmin,vmax=vmax,colormap=colormap,plot_aggr_mode=plot_aggr_mode,transform=plot_transform)
+                    plot_diagnostic_heatmaps(submatrices,pairs['Cluster'].to_numpy(),out_file_prefix + '_test_label_',transform=plot_transform)
+                    #print_binary_pair_labels(pairs, pairs['Cluster'], args.devEvaluation, out_file_prefix + '_pairs_', features_per_pair, features_per_pair, scatter_plot_type = scatter_plot_type, preprocessing_type=None,umap_args=umap_args)
 
         else:
-            log.info('clustering')
+            log.info('chosen mode: interaction pair clustering')
             
             features_raw = features
             #cluster submatrices
-            features = perform_clustering_preprocessing(features,preprocessing_type=preprocessing_type,encoder_file = args.devAutoEncoderFile,n_components= args.devNComponents,random_state=args.randomSeed,umap_args=umap_args)
+            
+            log.info('performing dimensionality reduction')            
+            features = perform_clustering_preprocessing(features,preprocessing_type=preprocessing_type,n_components= args.nComponents,random_state=args.randomSeed,umap_args=umap_args)
+            
+            log.info('clustering')            
             clusters = perform_clustering(features,k,args,cluster_algorithm=cluster_algorithm,random_state=args.randomSeed)
             pairs['Cluster'] = clusters
 
@@ -1811,8 +1528,9 @@ def main(args=None):
             log.info('plotting results in scatter plot')
             plot_results(features,features_raw,clusters,out_file_fig,scatter_plot_type = scatter_plot_type,preprocessing_type=preprocessing_type,umap_args=umap_args)
             
-            cluster_occurence_per_region(pairs,out_file_prefix,regions,args.devEvaluation,random_state=args.randomSeed)
-            print_binary_pair_labels(pairs, clusters, args.devEvaluation, out_file_prefix, features, features_raw, scatter_plot_type = scatter_plot_type, preprocessing_type=preprocessing_type,umap_args=umap_args)
+            log.info('apply occurrence clustering')
+            cluster_occurence_per_region(pairs,out_file_prefix,regions,args.evaluation,random_state=args.randomSeed)
+            print_binary_pair_labels(pairs, clusters, args.evaluation, out_file_prefix, features, features_raw, scatter_plot_type = scatter_plot_type, preprocessing_type=preprocessing_type,umap_args=umap_args)
      
 
         
